@@ -4,7 +4,7 @@
   "Name": "WebDAV Backup",
   "Description": "Backup and restore Flow Launcher settings using a WebDAV server.",
   "Author": "Liaco",
-  "Version": "1.0.0",
+  "Version": "1.1.0",
   "Language": "csharp",
   "Website": "https://github.com/Liaco123/Flow.Launcher.Plugin.WebDAVBackup",
   "IcoPath": "Images\\app.png",

@@ -35,6 +35,16 @@ jobs:
 
           $manifest = Get-Content "plugin.json" -Raw | ConvertFrom-Json
           $version = $manifest.Version
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tagVersion = $env:GITHUB_REF_NAME
+            if ($tagVersion.StartsWith("v")) {
+              $tagVersion = $tagVersion.Substring(1)
+            }
+
+            if ($tagVersion -ne $version) {
+              throw "Version mismatch: tag '$($env:GITHUB_REF_NAME)' does not match plugin.json Version '$version'."
+            }
+          }
           $tfm = "net6.0-windows7.0"
           $packageRoot = "dist/Flow.Launcher.Plugin.WebDAVBackup"
           $buildOutput = "bin/Release/$tfm"
