@@ -1,0 +1,23 @@
+# Build outputs
+bin/
+obj/
+artifacts/
+dist/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Test / tooling caches
+TestResults/
+*.cache
+*.log
+
+# Local publish outputs
+Flow.Launcher.Plugin.WebDAVBackup.dll
+Flow.Launcher.Plugin.WebDAVBackup.deps.json
+Flow.Launcher.Plugin.WebDAVBackup.pdb

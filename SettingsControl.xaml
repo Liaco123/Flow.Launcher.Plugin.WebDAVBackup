@@ -1,0 +1,65 @@
+<UserControl x:Class="Flow.Launcher.Plugin.WebDAVBackup.SettingsControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             d:DesignHeight="340"
+             d:DesignWidth="520"
+             mc:Ignorable="d">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid Margin="12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="8" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0"
+                       FontSize="15"
+                       FontWeight="SemiBold"
+                       Text="WebDAV Backup Settings" />
+
+            <TextBlock Grid.Row="2"
+                       Margin="0,8,0,4"
+                       Text="Server URL" />
+            <TextBox x:Name="ServerUrlTextBox"
+                     Grid.Row="3"
+                     MinWidth="300"
+                     Margin="0,0,0,8"
+                     TextChanged="ServerUrlTextBox_OnTextChanged" />
+
+            <TextBlock Grid.Row="4"
+                       Margin="0,0,0,4"
+                       Text="Username" />
+            <TextBox x:Name="UsernameTextBox"
+                     Grid.Row="5"
+                     MinWidth="300"
+                     Margin="0,0,0,8"
+                     TextChanged="UsernameTextBox_OnTextChanged" />
+
+            <TextBlock Grid.Row="6"
+                       Margin="0,0,0,4"
+                       Text="Password" />
+            <PasswordBox x:Name="PasswordInput"
+                         Grid.Row="7"
+                         MinWidth="300"
+                         Margin="0,0,0,8"
+                         PasswordChanged="PasswordInput_OnPasswordChanged" />
+
+            <TextBlock Grid.Row="8"
+                       Margin="0,0,0,4"
+                       Text="Backup Filename" />
+            <TextBox x:Name="BackupFilenameTextBox"
+                     Grid.Row="9"
+                     MinWidth="300"
+                     TextChanged="BackupFilenameTextBox_OnTextChanged" />
+        </Grid>
+    </ScrollViewer>
+</UserControl>
