@@ -3,63 +3,101 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-             d:DesignHeight="340"
-             d:DesignWidth="520"
+             d:DesignHeight="480"
+             d:DesignWidth="560"
              mc:Ignorable="d">
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <Grid Margin="12">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="8" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="8" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
 
-            <TextBlock Grid.Row="0"
-                       FontSize="15"
-                       FontWeight="SemiBold"
-                       Text="WebDAV Backup Settings" />
+        <TextBlock Grid.Row="0"
+                   FontSize="15"
+                   FontWeight="SemiBold"
+                   Text="WebDAV Backup Settings" />
 
-            <TextBlock Grid.Row="2"
-                       Margin="0,8,0,4"
-                       Text="Server URL" />
-            <TextBox x:Name="ServerUrlTextBox"
-                     Grid.Row="3"
-                     MinWidth="300"
-                     Margin="0,0,0,8"
-                     TextChanged="ServerUrlTextBox_OnTextChanged" />
+        <TextBlock Grid.Row="1"
+                   Margin="0,4,0,0"
+                   Foreground="#FF666666"
+                   Text="Changes are auto-saved. Backup directories are selectable below." />
 
-            <TextBlock Grid.Row="4"
-                       Margin="0,0,0,4"
-                       Text="Username" />
-            <TextBox x:Name="UsernameTextBox"
-                     Grid.Row="5"
-                     MinWidth="300"
-                     Margin="0,0,0,8"
-                     TextChanged="UsernameTextBox_OnTextChanged" />
+        <TextBlock Grid.Row="3"
+                   Margin="0,10,0,4"
+                   Text="Server URL" />
+        <TextBox x:Name="ServerUrlTextBox"
+                 Grid.Row="4"
+                 MinWidth="360"
+                 TextChanged="ServerUrlTextBox_OnTextChanged" />
 
-            <TextBlock Grid.Row="6"
-                       Margin="0,0,0,4"
-                       Text="Password" />
+        <TextBlock Grid.Row="5"
+                   Margin="0,10,0,4"
+                   Text="Username" />
+        <TextBox x:Name="UsernameTextBox"
+                 Grid.Row="6"
+                 MinWidth="360"
+                 TextChanged="UsernameTextBox_OnTextChanged" />
+
+        <TextBlock Grid.Row="7"
+                   Margin="0,10,0,4"
+                   Text="Password" />
+
+        <Grid Grid.Row="8">
             <PasswordBox x:Name="PasswordInput"
-                         Grid.Row="7"
-                         MinWidth="300"
-                         Margin="0,0,0,8"
+                         MinWidth="360"
                          PasswordChanged="PasswordInput_OnPasswordChanged" />
-
-            <TextBlock Grid.Row="8"
-                       Margin="0,0,0,4"
-                       Text="Backup Filename" />
-            <TextBox x:Name="BackupFilenameTextBox"
-                     Grid.Row="9"
-                     MinWidth="300"
-                     TextChanged="BackupFilenameTextBox_OnTextChanged" />
+            <TextBox x:Name="PasswordVisibleTextBox"
+                     MinWidth="360"
+                     Visibility="Collapsed"
+                     TextChanged="PasswordVisibleTextBox_OnTextChanged" />
         </Grid>
-    </ScrollViewer>
+
+        <CheckBox x:Name="ShowPasswordCheckBox"
+                  Grid.Row="9"
+                  Margin="0,4,0,0"
+                  Content="Show password"
+                  Checked="ShowPasswordCheckBox_OnChanged"
+                  Unchecked="ShowPasswordCheckBox_OnChanged" />
+
+        <TextBlock Grid.Row="10"
+                   Margin="0,10,0,4"
+                   Text="Backup Filename" />
+        <TextBox x:Name="BackupFilenameTextBox"
+                 Grid.Row="11"
+                 MinWidth="360"
+                 TextChanged="BackupFilenameTextBox_OnTextChanged" />
+
+        <TextBlock Grid.Row="12"
+                   Margin="0,10,0,4"
+                   Text="Backup Directories (FlowLauncher subfolders)" />
+
+        <Border Grid.Row="13"
+                BorderBrush="#FFD0D0D0"
+                BorderThickness="1"
+                CornerRadius="4"
+                Padding="8">
+            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <StackPanel x:Name="BackupDirectoriesPanel" />
+            </ScrollViewer>
+        </Border>
+
+        <TextBlock Grid.Row="14"
+                   Margin="0,6,0,0"
+                   Foreground="#FF666666"
+                   Text="Tip: Pull restore runs in an external script to avoid FlowLauncher file locks." />
+    </Grid>
 </UserControl>

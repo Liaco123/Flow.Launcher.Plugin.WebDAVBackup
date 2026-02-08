@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -15,7 +16,6 @@ public class Main : IPlugin, ISettingProvider
     private const string FlowRootDirectoryName = "FlowLauncher";
     private const string IconRelativePath = "Images\\app.png";
     private const string RemoteBackupFolderName = "flowlauncher_backup";
-    private static readonly string[] BackupSubDirectories = { "Settings", "Plugins", "Themes" };
     private static readonly HttpClient WebDavHttpClient = new();
 
     private PluginInitContext? _context;
@@ -25,10 +25,31 @@ public class Main : IPlugin, ISettingProvider
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _settings = context.API.LoadSettingJsonStorage<Settings>() ?? new Settings();
+        _settings.BackupDirectories ??= new List<string>();
+
+        var settingsChanged = false;
 
         if (string.IsNullOrWhiteSpace(_settings.BackupFilename))
         {
             _settings.BackupFilename = Settings.DefaultBackupFilename;
+            settingsChanged = true;
+        }
+
+        var availableDirectories = GetAvailableFlowSubDirectories();
+        var normalizedDirectories = NormalizeBackupDirectories(_settings.BackupDirectories, availableDirectories);
+        if (normalizedDirectories.Count == 0 && availableDirectories.Count > 0)
+        {
+            normalizedDirectories = GetDefaultBackupDirectories(availableDirectories);
+        }
+
+        if (!Enumerable.SequenceEqual(_settings.BackupDirectories, normalizedDirectories, StringComparer.OrdinalIgnoreCase))
+        {
+            _settings.BackupDirectories = normalizedDirectories;
+            settingsChanged = true;
+        }
+
+        if (settingsChanged)
+        {
             SaveSettings();
         }
     }
@@ -47,15 +68,15 @@ public class Main : IPlugin, ISettingProvider
 
     public Control CreateSettingPanel()
     {
-        return new SettingsControl(_settings, SaveSettings);
+        return new SettingsControl(_settings, SaveSettings, GetAvailableFlowSubDirectories());
     }
 
     private Result CreatePushResult()
     {
         return new Result
         {
-            Title = "Push settings backup to WebDAV",
-            SubTitle = "Zip Settings/Plugins/Themes and upload to flowlauncher_backup.",
+            Title = "Push backup to WebDAV",
+            SubTitle = "Zip selected FlowLauncher subfolders and upload to flowlauncher_backup.",
             IcoPath = GetIconPath(),
             Score = 100,
             Action = actionContext =>
@@ -70,8 +91,8 @@ public class Main : IPlugin, ISettingProvider
     {
         return new Result
         {
-            Title = "Pull settings backup from WebDAV",
-            SubTitle = "Download and restore Settings/Plugins/Themes after restart.",
+            Title = "Pull backup from WebDAV",
+            SubTitle = "Download backup, stop Flow Launcher, restore files, then restart.",
             IcoPath = GetIconPath(),
             Score = 99,
             Action = actionContext =>
@@ -104,9 +125,16 @@ public class Main : IPlugin, ISettingProvider
         }
 
         var flowRootPath = GetFlowRootPath();
-        if (!HasAnyBackupDirectory(flowRootPath))
+        if (!Directory.Exists(flowRootPath))
         {
-            ShowMessage("WebDAV Backup", "No Settings/Plugins/Themes directory found in FlowLauncher data folder.");
+            ShowMessage("WebDAV Backup", $"FlowLauncher folder not found: {flowRootPath}");
+            return;
+        }
+
+        var selectedDirectories = GetEffectiveBackupDirectories();
+        if (selectedDirectories.Count == 0)
+        {
+            ShowMessage("WebDAV Backup", "No backup subfolder selected in plugin settings.");
             return;
         }
 
@@ -116,8 +144,12 @@ public class Main : IPlugin, ISettingProvider
 
         try
         {
-            // Build a single archive that contains Settings, Plugins and Themes.
-            CreateBackupArchive(flowRootPath, zipPath);
+            var addedDirectoryCount = CreateBackupArchive(flowRootPath, zipPath, selectedDirectories);
+            if (addedDirectoryCount == 0)
+            {
+                ShowMessage("WebDAV Backup", "Selected subfolders were not found under FlowLauncher.");
+                return;
+            }
 
             var remoteFolderUri = BuildRemoteFolderUri(_settings.ServerUrl, RemoteBackupFolderName);
             var ensureFolderResult = await EnsureRemoteBackupFolderAsync(remoteFolderUri).ConfigureAwait(false);
@@ -190,7 +222,7 @@ public class Main : IPlugin, ISettingProvider
             var flowRootPath = GetFlowRootPath();
             var flowExecutablePath = Process.GetCurrentProcess().MainModule?.FileName ?? "Flow.Launcher.exe";
 
-            // Restore must happen out-of-process because files are locked while Flow Launcher is running.
+            // Restore must run out-of-process, otherwise FlowLauncher keeps files locked.
             var scriptContent = BuildRestoreScript(
                 zipPath,
                 flowRootPath,
@@ -276,6 +308,19 @@ public class Main : IPlugin, ISettingProvider
         return true;
     }
 
+    private IReadOnlyList<string> GetEffectiveBackupDirectories()
+    {
+        var availableDirectories = GetAvailableFlowSubDirectories();
+        var selectedDirectories = NormalizeBackupDirectories(_settings.BackupDirectories, availableDirectories);
+
+        if (selectedDirectories.Count == 0 && availableDirectories.Count > 0)
+        {
+            return GetDefaultBackupDirectories(availableDirectories);
+        }
+
+        return selectedDirectories;
+    }
+
     private static AuthenticationHeaderValue CreateBasicAuthHeader(string username, string password)
     {
         var bytes = Encoding.UTF8.GetBytes($"{username}:{password}");
@@ -344,40 +389,36 @@ public class Main : IPlugin, ISettingProvider
             "New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null",
             "Expand-Archive -LiteralPath '" + escapedZipPath + "' -DestinationPath $extractRoot -Force",
             string.Empty,
-            "$settingsSource = Join-Path $extractRoot 'Settings'",
-            "if (Test-Path -LiteralPath $settingsSource) {",
-            "    $settingsTarget = Join-Path '" + escapedFlowRootPath + "' 'Settings'",
-            "    if (Test-Path -LiteralPath $settingsTarget) {",
-            "        Remove-Item -LiteralPath $settingsTarget -Recurse -Force",
-            "    }",
-            "    Copy-Item -LiteralPath $settingsSource -Destination $settingsTarget -Recurse -Force",
-            "}",
+            "$currentPluginFolderName = '" + escapedCurrentPluginFolderName + "'",
+            "Get-ChildItem -LiteralPath $extractRoot -Directory | ForEach-Object {",
+            "    $folderName = $_.Name",
+            "    $source = $_.FullName",
+            "    $target = Join-Path '" + escapedFlowRootPath + "' $folderName",
             string.Empty,
-            "$themesSource = Join-Path $extractRoot 'Themes'",
-            "if (Test-Path -LiteralPath $themesSource) {",
-            "    $themesTarget = Join-Path '" + escapedFlowRootPath + "' 'Themes'",
-            "    if (Test-Path -LiteralPath $themesTarget) {",
-            "        Remove-Item -LiteralPath $themesTarget -Recurse -Force",
-            "    }",
-            "    Copy-Item -LiteralPath $themesSource -Destination $themesTarget -Recurse -Force",
-            "}",
-            string.Empty,
-            "$pluginsSource = Join-Path $extractRoot 'Plugins'",
-            "if (Test-Path -LiteralPath $pluginsSource) {",
-            "    $pluginsTarget = Join-Path '" + escapedFlowRootPath + "' 'Plugins'",
-            "    if (-not (Test-Path -LiteralPath $pluginsTarget)) {",
-            "        New-Item -ItemType Directory -Path $pluginsTarget -Force | Out-Null",
-            "    }",
-            "    Get-ChildItem -LiteralPath $pluginsSource -Directory | Where-Object { $_.Name -ne '" + escapedCurrentPluginFolderName + "' } | ForEach-Object {",
-            "        $dest = Join-Path $pluginsTarget $_.Name",
-            "        if (Test-Path -LiteralPath $dest) {",
-            "            Remove-Item -LiteralPath $dest -Recurse -Force",
+            "    if ($folderName -ieq 'Plugins') {",
+            "        if (-not (Test-Path -LiteralPath $target)) {",
+            "            New-Item -ItemType Directory -Path $target -Force | Out-Null",
             "        }",
-            "        Copy-Item -LiteralPath $_.FullName -Destination $dest -Recurse -Force",
+            "        Get-ChildItem -LiteralPath $source -Directory | ForEach-Object {",
+            "            if (-not [string]::IsNullOrWhiteSpace($currentPluginFolderName) -and $_.Name -ieq $currentPluginFolderName) {",
+            "                return",
+            "            }",
+            "            $pluginTarget = Join-Path $target $_.Name",
+            "            if (Test-Path -LiteralPath $pluginTarget) {",
+            "                Remove-Item -LiteralPath $pluginTarget -Recurse -Force",
+            "            }",
+            "            Copy-Item -LiteralPath $_.FullName -Destination $pluginTarget -Recurse -Force",
+            "        }",
+            "        Get-ChildItem -LiteralPath $source -File | ForEach-Object {",
+            "            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $target $_.Name) -Force",
+            "        }",
+            "        return",
             "    }",
-            "    Get-ChildItem -LiteralPath $pluginsSource -File | ForEach-Object {",
-            "        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $pluginsTarget $_.Name) -Force",
+            string.Empty,
+            "    if (Test-Path -LiteralPath $target) {",
+            "        Remove-Item -LiteralPath $target -Recurse -Force",
             "    }",
+            "    Copy-Item -LiteralPath $source -Destination $target -Recurse -Force",
             "}",
             string.Empty,
             "Start-Sleep -Milliseconds 700",
@@ -393,7 +434,7 @@ public class Main : IPlugin, ISettingProvider
         return string.Join(Environment.NewLine, lines);
     }
 
-    private static void CreateBackupArchive(string flowRootPath, string zipPath)
+    private static int CreateBackupArchive(string flowRootPath, string zipPath, IReadOnlyList<string> selectedDirectories)
     {
         if (File.Exists(zipPath))
         {
@@ -403,16 +444,26 @@ public class Main : IPlugin, ISettingProvider
         using var zipStream = File.Create(zipPath);
         using var archive = new ZipArchive(zipStream, ZipArchiveMode.Create);
 
-        foreach (var folderName in BackupSubDirectories)
+        var addedDirectoryCount = 0;
+        foreach (var folderName in selectedDirectories)
         {
-            var sourceDirectory = Path.Combine(flowRootPath, folderName);
+            var normalizedFolderName = NormalizeDirectoryName(folderName);
+            if (string.IsNullOrWhiteSpace(normalizedFolderName))
+            {
+                continue;
+            }
+
+            var sourceDirectory = Path.Combine(flowRootPath, normalizedFolderName);
             if (!Directory.Exists(sourceDirectory))
             {
                 continue;
             }
 
-            AddDirectoryToArchive(archive, sourceDirectory, folderName);
+            AddDirectoryToArchive(archive, sourceDirectory, normalizedFolderName);
+            addedDirectoryCount++;
         }
+
+        return addedDirectoryCount;
     }
 
     private static void AddDirectoryToArchive(ZipArchive archive, string sourceDirectory, string rootFolderName)
@@ -423,19 +474,6 @@ public class Main : IPlugin, ISettingProvider
             var entryPath = $"{rootFolderName}/{relativePath.Replace('\\', '/')}";
             archive.CreateEntryFromFile(filePath, entryPath, CompressionLevel.Optimal);
         }
-    }
-
-    private static bool HasAnyBackupDirectory(string flowRootPath)
-    {
-        foreach (var folderName in BackupSubDirectories)
-        {
-            if (Directory.Exists(Path.Combine(flowRootPath, folderName)))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static string CreateTempDirectory()
@@ -450,9 +488,100 @@ public class Main : IPlugin, ISettingProvider
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), FlowRootDirectoryName);
     }
 
+    private static IReadOnlyList<string> GetAvailableFlowSubDirectories()
+    {
+        var flowRootPath = GetFlowRootPath();
+        if (!Directory.Exists(flowRootPath))
+        {
+            return Array.Empty<string>();
+        }
+
+        return Directory
+            .EnumerateDirectories(flowRootPath)
+            .Select(Path.GetFileName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ToList()!;
+    }
+
+    private static List<string> NormalizeBackupDirectories(IEnumerable<string>? sourceDirectories, IReadOnlyList<string> availableDirectories)
+    {
+        var result = new List<string>();
+        if (sourceDirectories == null)
+        {
+            return result;
+        }
+
+        var availableSet = new HashSet<string>(availableDirectories, StringComparer.OrdinalIgnoreCase);
+        var dedupeSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var sourceDirectory in sourceDirectories)
+        {
+            var normalizedName = NormalizeDirectoryName(sourceDirectory);
+            if (string.IsNullOrWhiteSpace(normalizedName))
+            {
+                continue;
+            }
+
+            if (!availableSet.Contains(normalizedName))
+            {
+                continue;
+            }
+
+            if (dedupeSet.Add(normalizedName))
+            {
+                result.Add(normalizedName);
+            }
+        }
+
+        return result;
+    }
+
+    private static List<string> GetDefaultBackupDirectories(IReadOnlyList<string> availableDirectories)
+    {
+        var result = new List<string>();
+        var availableSet = new HashSet<string>(availableDirectories, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var preferred in Settings.PreferredDefaultBackupDirectories)
+        {
+            if (availableSet.Contains(preferred))
+            {
+                result.Add(preferred);
+            }
+        }
+
+        if (result.Count > 0)
+        {
+            return result;
+        }
+
+        return availableDirectories.ToList();
+    }
+
+    private static string NormalizeDirectoryName(string? folderName)
+    {
+        if (string.IsNullOrWhiteSpace(folderName))
+        {
+            return string.Empty;
+        }
+
+        var normalized = folderName
+            .Trim()
+            .Replace('/', Path.DirectorySeparatorChar)
+            .Replace('\\', Path.DirectorySeparatorChar)
+            .Trim(Path.DirectorySeparatorChar);
+
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return string.Empty;
+        }
+
+        return Path.GetFileName(normalized);
+    }
+
     private string GetLocalBackupZipPath(string tempDirectory)
     {
-        // Keep local temp structure aligned with remote target: flowlauncher_backup/FlowBackup.zip
         return Path.Combine(tempDirectory, RemoteBackupFolderName, GetEffectiveBackupFilename());
     }
 
