@@ -6,7 +6,7 @@
   "Author": "Liaco",
   "Version": "1.0.0",
   "Language": "csharp",
-  "Website": "https://github.com/Flow-Launcher/Flow.Launcher",
+  "Website": "https://github.com/Liaco/Flow.Launcher.Plugin.WebDAVBackup",
   "IcoPath": "Images\\app.png",
   "ExecuteFileName": "Flow.Launcher.Plugin.WebDAVBackup.dll"
 }
