@@ -220,14 +220,17 @@ public class Main : IPlugin, ISettingProvider
             }
 
             var flowRootPath = GetFlowRootPath();
-            var flowExecutablePath = Process.GetCurrentProcess().MainModule?.FileName ?? "Flow.Launcher.exe";
+            var flowExecutablePath = Environment.ProcessPath ?? "Flow.Launcher.exe";
+            var flowProcessName = Process.GetCurrentProcess().ProcessName;
 
             // Restore must run out-of-process, otherwise FlowLauncher keeps files locked.
             var scriptContent = BuildRestoreScript(
                 zipPath,
                 flowRootPath,
                 flowExecutablePath,
-                GetCurrentPluginFolderName());
+                GetCurrentPluginFolderName(),
+                flowProcessName,
+                tempDirectory);
             await File.WriteAllTextAsync(scriptPath, scriptContent, new UTF8Encoding(false)).ConfigureAwait(false);
 
             var startInfo = new ProcessStartInfo
@@ -354,7 +357,9 @@ public class Main : IPlugin, ISettingProvider
         string zipPath,
         string flowRootPath,
         string flowExecutablePath,
-        string currentPluginFolderName)
+        string currentPluginFolderName,
+        string flowProcessName,
+        string tempDirectory)
     {
         static string EscapePowerShellLiteral(string value)
         {
@@ -365,70 +370,127 @@ public class Main : IPlugin, ISettingProvider
         var escapedFlowRootPath = EscapePowerShellLiteral(flowRootPath);
         var escapedFlowPath = EscapePowerShellLiteral(flowExecutablePath);
         var escapedCurrentPluginFolderName = EscapePowerShellLiteral(currentPluginFolderName);
+        var escapedFlowProcessName = EscapePowerShellLiteral(flowProcessName);
+        var escapedTempDirectory = EscapePowerShellLiteral(tempDirectory);
 
         var lines = new[]
         {
             "$ErrorActionPreference = 'Stop'",
-            "Start-Sleep -Seconds 1",
+            $"$logPath = Join-Path '{escapedTempDirectory}' 'restore_log.txt'",
+            "Add-Content -Path $logPath -Value 'Starting restore...'",
             string.Empty,
-            "$flowProcess = Get-Process -Name 'Flow.Launcher' -ErrorAction SilentlyContinue",
-            "if ($flowProcess) {",
-            "    $flowProcess | Stop-Process -Force",
-            "}",
-            string.Empty,
-            "Start-Sleep -Seconds 2",
-            string.Empty,
-            "if (-not (Test-Path -LiteralPath '" + escapedFlowRootPath + "')) {",
-            "    New-Item -ItemType Directory -Path '" + escapedFlowRootPath + "' -Force | Out-Null",
-            "}",
-            string.Empty,
-            "$extractRoot = Join-Path (Split-Path -LiteralPath '" + escapedZipPath + "' -Parent) 'extract'",
-            "if (Test-Path -LiteralPath $extractRoot) {",
-            "    Remove-Item -LiteralPath $extractRoot -Recurse -Force",
-            "}",
-            "New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null",
-            "Expand-Archive -LiteralPath '" + escapedZipPath + "' -DestinationPath $extractRoot -Force",
-            string.Empty,
-            "$currentPluginFolderName = '" + escapedCurrentPluginFolderName + "'",
-            "Get-ChildItem -LiteralPath $extractRoot -Directory | ForEach-Object {",
-            "    $folderName = $_.Name",
-            "    $source = $_.FullName",
-            "    $target = Join-Path '" + escapedFlowRootPath + "' $folderName",
-            string.Empty,
-            "    if ($folderName -ieq 'Plugins') {",
-            "        if (-not (Test-Path -LiteralPath $target)) {",
-            "            New-Item -ItemType Directory -Path $target -Force | Out-Null",
+            "try {",
+            "    # 1. Stop Flow Launcher processes",
+            "    Add-Content -Path $logPath -Value 'Stopping Flow.Launcher processes...'",
+            $"    $flowProcessName = '{escapedFlowProcessName}'",
+            "    $flowProcesses = Get-Process -Name $flowProcessName -ErrorAction SilentlyContinue",
+            "    if ($flowProcesses) {",
+            "        foreach ($p in $flowProcesses) {",
+            "            Add-Content -Path $logPath -Value \"Stopping process ID $($p.Id)\"",
+            "            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue",
             "        }",
-            "        Get-ChildItem -LiteralPath $source -Directory | ForEach-Object {",
-            "            if (-not [string]::IsNullOrWhiteSpace($currentPluginFolderName) -and $_.Name -ieq $currentPluginFolderName) {",
-            "                return",
+            "        # Wait up to 5 seconds for processes to exit",
+            "        $timeout = 5",
+            "        while ($timeout -gt 0) {",
+            "            $running = Get-Process -Name $flowProcessName -ErrorAction SilentlyContinue",
+            "            if (-not $running) {",
+            "                break",
             "            }",
-            "            $pluginTarget = Join-Path $target $_.Name",
-            "            if (Test-Path -LiteralPath $pluginTarget) {",
-            "                Remove-Item -LiteralPath $pluginTarget -Recurse -Force",
-            "            }",
-            "            Copy-Item -LiteralPath $_.FullName -Destination $pluginTarget -Recurse -Force",
+            "            Start-Sleep -Seconds 1",
+            "            $timeout--",
             "        }",
-            "        Get-ChildItem -LiteralPath $source -File | ForEach-Object {",
-            "            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $target $_.Name) -Force",
-            "        }",
-            "        return",
             "    }",
             string.Empty,
-            "    if (Test-Path -LiteralPath $target) {",
-            "        Remove-Item -LiteralPath $target -Recurse -Force",
+            "    # 2. Extract Archive",
+            "    Add-Content -Path $logPath -Value 'Extracting backup zip...'",
+            $"    $extractRoot = Join-Path '{escapedTempDirectory}' 'extract'",
+            "    if (Test-Path -LiteralPath $extractRoot) {",
+            "        Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue",
             "    }",
-            "    Copy-Item -LiteralPath $source -Destination $target -Recurse -Force",
-            "}",
+            "    New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null",
+            $"    Expand-Archive -LiteralPath '{escapedZipPath}' -DestinationPath $extractRoot -Force",
             string.Empty,
-            "Start-Sleep -Milliseconds 700",
-            "Start-Process -FilePath '" + escapedFlowPath + "'",
+            "    # 3. Restore files",
+            "    Add-Content -Path $logPath -Value 'Restoring files...'",
+            $"    $currentPluginFolderName = '{escapedCurrentPluginFolderName}'",
+            "    Get-ChildItem -LiteralPath $extractRoot -Directory | ForEach-Object {",
+            "        $folderName = $_.Name",
+            "        $source = $_.FullName",
+            $"        $target = Join-Path '{escapedFlowRootPath}' $folderName",
             string.Empty,
-            "if (Test-Path -LiteralPath $extractRoot) {",
-            "    Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue",
+            "        Add-Content -Path $logPath -Value \"Processing folder: $folderName\"",
+            string.Empty,
+            "        if ($folderName -ieq 'Plugins') {",
+            "            if (-not (Test-Path -LiteralPath $target)) {",
+            "                New-Item -ItemType Directory -Path $target -Force | Out-Null",
+            "            }",
+            "            Get-ChildItem -LiteralPath $source -Directory | ForEach-Object {",
+            "                if (-not [string]::IsNullOrWhiteSpace($currentPluginFolderName) -and $_.Name -ieq $currentPluginFolderName) {",
+            "                    Add-Content -Path $logPath -Value \"Skipping current plugin folder: $($_.Name)\"",
+            "                    return",
+            "                }",
+            "                $pluginTarget = Join-Path $target $_.Name",
+            "                Add-Content -Path $logPath -Value \"Restoring plugin: $($_.Name) -> $pluginTarget\"",
+            "                if (Test-Path -LiteralPath $pluginTarget) {",
+            "                    # Retry delete if locked",
+            "                    $retry = 3",
+            "                    while ($retry -gt 0) {",
+            "                        try {",
+            "                            Remove-Item -LiteralPath $pluginTarget -Recurse -Force",
+            "                            break",
+            "                        } catch {",
+            "                            Add-Content -Path $logPath -Value \"Warning: Failed to delete $pluginTarget, retrying...\"",
+            "                            Start-Sleep -Seconds 1",
+            "                            $retry--",
+            "                        }",
+            "                    }",
+            "                }",
+            "                Copy-Item -LiteralPath $_.FullName -Destination $pluginTarget -Recurse -Force",
+            "            }",
+            "            Get-ChildItem -LiteralPath $source -File | ForEach-Object {",
+            "                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $target $_.Name) -Force",
+            "            }",
+            "            return",
+            "        }",
+            string.Empty,
+            "        if (Test-Path -LiteralPath $target) {",
+            "            $retry = 3",
+            "            while ($retry -gt 0) {",
+            "                try {",
+            "                    Remove-Item -LiteralPath $target -Recurse -Force",
+            "                    break",
+            "                } catch {",
+            "                    Add-Content -Path $logPath -Value \"Warning: Failed to delete $target, retrying...\"",
+            "                    Start-Sleep -Seconds 1",
+            "                    $retry--",
+            "                }",
+            "            }",
+            "        }",
+            "        Copy-Item -LiteralPath $source -Destination $target -Recurse -Force",
+            "    }",
+            "    Add-Content -Path $logPath -Value 'Restore files completed successfully.'",
             "}",
-            "Remove-Item -LiteralPath '" + escapedZipPath + "' -Force -ErrorAction SilentlyContinue",
-            "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue"
+            "catch {",
+            "    Add-Content -Path $logPath -Value \"ERROR: $_\"",
+            "}",
+            "finally {",
+            "    # 4. Restart Flow Launcher",
+            $"    Add-Content -Path $logPath -Value \"Starting Flow.Launcher process from: '{escapedFlowPath}'\"",
+            "    try {",
+            $"        Start-Process -FilePath '{escapedFlowPath}'",
+            "        Add-Content -Path $logPath -Value 'Flow.Launcher process started.'",
+            "    }",
+            "    catch {",
+            "        Add-Content -Path $logPath -Value \"ERROR: Failed to start Flow.Launcher: $_\"",
+            "    }",
+            string.Empty,
+            "    # 5. Cleanup temp files",
+            "    if (Test-Path -LiteralPath $extractRoot) {",
+            "        Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue",
+            "    }",
+            $"    Remove-Item -LiteralPath '{escapedZipPath}' -Force -ErrorAction SilentlyContinue",
+            "    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
+            "}"
         };
 
         return string.Join(Environment.NewLine, lines);
@@ -483,12 +545,25 @@ public class Main : IPlugin, ISettingProvider
         return path;
     }
 
-    private static string GetFlowRootPath()
+    private string GetFlowRootPath()
     {
+        var pluginDirectory = _context?.CurrentPluginMetadata?.PluginDirectory;
+        if (!string.IsNullOrWhiteSpace(pluginDirectory))
+        {
+            var pluginsDir = Path.GetDirectoryName(pluginDirectory);
+            if (!string.IsNullOrWhiteSpace(pluginsDir))
+            {
+                var flowRoot = Path.GetDirectoryName(pluginsDir);
+                if (!string.IsNullOrWhiteSpace(flowRoot))
+                {
+                    return flowRoot;
+                }
+            }
+        }
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), FlowRootDirectoryName);
     }
 
-    private static IReadOnlyList<string> GetAvailableFlowSubDirectories()
+    private IReadOnlyList<string> GetAvailableFlowSubDirectories()
     {
         var flowRootPath = GetFlowRootPath();
         if (!Directory.Exists(flowRootPath))
