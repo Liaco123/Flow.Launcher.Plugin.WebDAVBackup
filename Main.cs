@@ -60,14 +60,19 @@ public class Main : IPlugin, ISettingProvider
 
     public List<Result> Query(Query query)
     {
-        var command = (query.Search ?? string.Empty).Trim().TrimStart(':', '：').ToLowerInvariant();
+        var command = NormalizeCommand(query.Search);
 
-        return command switch
+        if (command == "push")
         {
-            "push" => new List<Result> { CreatePushResult() },
-            "pull" => CreatePullResults(),
-            _ => new List<Result> { CreatePushResult(), CreatePullResult() }
-        };
+            return new List<Result> { CreatePushResult() };
+        }
+
+        if (command == "pull" || command.StartsWith("pull ", StringComparison.Ordinal))
+        {
+            return CreatePullResults();
+        }
+
+        return new List<Result> { CreatePushResult(), CreatePullResult() };
     }
 
     public Control CreateSettingPanel()
@@ -499,6 +504,22 @@ public class Main : IPlugin, ISettingProvider
         return trimmed.EndsWith("/", StringComparison.Ordinal) ? trimmed : $"{trimmed}/";
     }
 
+    private static string NormalizeCommand(string? search)
+    {
+        var command = (search ?? string.Empty).Trim();
+        if (command.StartsWith("wd:", StringComparison.OrdinalIgnoreCase) ||
+            command.StartsWith("wd：", StringComparison.OrdinalIgnoreCase))
+        {
+            command = command.Substring(3).Trim();
+        }
+        else if (command.StartsWith("wd ", StringComparison.OrdinalIgnoreCase))
+        {
+            command = command.Substring(3).Trim();
+        }
+
+        return command.TrimStart(':', '：').ToLowerInvariant();
+    }
+
     private static string BuildRestoreScript(
         string zipPath,
         string flowRootPath,
@@ -873,6 +894,7 @@ public class Main : IPlugin, ISettingProvider
     private static List<RemoteBackupFile> ParseRemoteBackups(string responseBody, Uri remoteFolderUri, string backupFilename)
     {
         var result = new List<RemoteBackupFile>();
+        var expectedBaseFileName = Path.GetFileName(backupFilename);
         var expectedExtension = Path.GetExtension(backupFilename);
         var expectedPrefix = Path.GetFileNameWithoutExtension(backupFilename) + "_";
 
@@ -894,7 +916,7 @@ public class Main : IPlugin, ISettingProvider
             }
 
             var fileName = Uri.UnescapeDataString(hrefValue.TrimEnd('/').Split('/').Last());
-            if (!IsManagedBackupFilename(fileName, expectedPrefix, expectedExtension))
+            if (!IsManagedBackupFilename(fileName, expectedBaseFileName, expectedPrefix, expectedExtension))
             {
                 continue;
             }
@@ -917,14 +939,25 @@ public class Main : IPlugin, ISettingProvider
         return result;
     }
 
-    private static bool IsManagedBackupFilename(string fileName, string expectedPrefix, string expectedExtension)
+    private static bool IsManagedBackupFilename(
+        string fileName,
+        string expectedBaseFileName,
+        string expectedPrefix,
+        string expectedExtension)
     {
-        return fileName.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase)
-            && fileName.EndsWith(expectedExtension, StringComparison.OrdinalIgnoreCase);
+        return fileName.Equals(expectedBaseFileName, StringComparison.OrdinalIgnoreCase)
+            || (fileName.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase)
+                && fileName.EndsWith(expectedExtension, StringComparison.OrdinalIgnoreCase));
     }
 
     private static DateTimeOffset? TryParseBackupTimestamp(string fileName, string expectedPrefix, string expectedExtension)
     {
+        if (!fileName.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase) ||
+            !fileName.EndsWith(expectedExtension, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
         var timestampText = fileName.Substring(expectedPrefix.Length, fileName.Length - expectedPrefix.Length - expectedExtension.Length);
         return DateTimeOffset.TryParseExact(
             timestampText,
