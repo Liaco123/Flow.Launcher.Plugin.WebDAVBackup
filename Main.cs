@@ -68,7 +68,45 @@ public class Main : IPlugin, ISettingProvider
 
     public Control CreateSettingPanel()
     {
-        return new SettingsControl(_settings, SaveSettings, GetAvailableFlowSubDirectories());
+        return new SettingsControl(_settings, SaveSettings, TestWebDavConnectionAsync, GetAvailableFlowSubDirectories());
+    }
+
+    private async Task<(bool Success, string Message)> TestWebDavConnectionAsync()
+    {
+        if (!ValidateSettings(out var validationError))
+        {
+            return (false, validationError);
+        }
+
+        try
+        {
+            var serverUri = new Uri(AppendTrailingSlash(_settings.ServerUrl), UriKind.Absolute);
+            using var request = new HttpRequestMessage(new HttpMethod("PROPFIND"), serverUri);
+            request.Headers.Authorization = CreateBasicAuthHeader(_settings.Username, _settings.Password);
+            request.Headers.TryAddWithoutValidation("Depth", "0");
+
+            using var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var response = await WebDavHttpClient.SendAsync(request, cancellationTokenSource.Token).ConfigureAwait(false);
+            if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.MultiStatus)
+            {
+                return (true, "Connection successful.");
+            }
+
+            var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var message = string.IsNullOrWhiteSpace(responseBody)
+                ? $"Connection failed ({(int)response.StatusCode} {response.ReasonPhrase})."
+                : $"Connection failed ({(int)response.StatusCode} {response.ReasonPhrase}): {responseBody}";
+            return (false, message);
+        }
+        catch (TaskCanceledException)
+        {
+            return (false, "Connection test timed out after 15 seconds.");
+        }
+        catch (Exception ex)
+        {
+            LogException("WebDAV connection test failed.", ex);
+            return (false, $"Connection test failed: {ex.Message}");
+        }
     }
 
     private Result CreatePushResult()

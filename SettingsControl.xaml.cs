@@ -8,6 +8,7 @@ public partial class SettingsControl : UserControl
 {
     private readonly Settings _settings;
     private readonly Action _saveSettings;
+    private readonly Func<Task<(bool Success, string Message)>> _testConnection;
     private readonly IReadOnlyList<string> _availableBackupDirectories;
     private readonly DispatcherTimer _saveDebounceTimer;
 
@@ -15,10 +16,15 @@ public partial class SettingsControl : UserControl
     private bool _isDirty;
     private bool _isSyncingPassword;
 
-    public SettingsControl(Settings settings, Action saveSettings, IReadOnlyList<string> availableBackupDirectories)
+    public SettingsControl(
+        Settings settings,
+        Action saveSettings,
+        Func<Task<(bool Success, string Message)>> testConnection,
+        IReadOnlyList<string> availableBackupDirectories)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _saveSettings = saveSettings ?? throw new ArgumentNullException(nameof(saveSettings));
+        _testConnection = testConnection ?? throw new ArgumentNullException(nameof(testConnection));
         _availableBackupDirectories = (availableBackupDirectories ?? Array.Empty<string>())
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -82,7 +88,7 @@ public partial class SettingsControl : UserControl
         _isSyncingPassword = false;
 
         _settings.Password = PasswordInput.Password;
-        MarkDirty();
+        MarkDirty(saveImmediately: true);
     }
 
     private void PasswordVisibleTextBox_OnTextChanged(object sender, TextChangedEventArgs e)
@@ -97,12 +103,39 @@ public partial class SettingsControl : UserControl
         _isSyncingPassword = false;
 
         _settings.Password = PasswordVisibleTextBox.Text;
-        MarkDirty();
+        MarkDirty(saveImmediately: true);
     }
 
     private void ShowPasswordCheckBox_OnChanged(object sender, RoutedEventArgs e)
     {
         ApplyPasswordVisibility();
+    }
+
+    private async void TestConnectionButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (!CanUpdateSettings())
+        {
+            return;
+        }
+
+        PersistSettingsNow();
+
+        TestConnectionButton.IsEnabled = false;
+        TestConnectionStatusTextBlock.Foreground = System.Windows.Media.Brushes.Gray;
+        TestConnectionStatusTextBlock.Text = "Testing WebDAV connection...";
+
+        try
+        {
+            var result = await _testConnection();
+            TestConnectionStatusTextBlock.Text = result.Message;
+            TestConnectionStatusTextBlock.Foreground = result.Success
+                ? System.Windows.Media.Brushes.ForestGreen
+                : System.Windows.Media.Brushes.Firebrick;
+        }
+        finally
+        {
+            TestConnectionButton.IsEnabled = true;
+        }
     }
 
     private void BackupFilenameTextBox_OnTextChanged(object sender, TextChangedEventArgs e)
@@ -210,9 +243,16 @@ public partial class SettingsControl : UserControl
         return _initialized;
     }
 
-    private void MarkDirty()
+    private void MarkDirty(bool saveImmediately = false)
     {
         _isDirty = true;
+
+        if (saveImmediately)
+        {
+            PersistSettingsNow();
+            return;
+        }
+
         _saveDebounceTimer.Stop();
         _saveDebounceTimer.Start();
     }
