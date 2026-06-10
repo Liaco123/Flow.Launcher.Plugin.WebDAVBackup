@@ -24,7 +24,7 @@
 在 Flow Launcher 输入：
 
 ```text
-pm install https://github.com/Liaco123/Flow.Launcher.Plugin.WebDAVBackup/releases/download/v1.0.0/Flow.Launcher.Plugin.WebDAVBackup-1.0.0.zip
+pm install https://github.com/Liaco123/Flow.Launcher.Plugin.WebDAVBackup/releases/download/v1.1.2/Flow.Launcher.Plugin.WebDAVBackup-1.1.2.zip
 ```
 
 ### 使用
@@ -81,7 +81,7 @@ This plugin backs up Flow Launcher data to a WebDAV server and restores it on de
 In Flow Launcher, run:
 
 ```text
-pm install https://github.com/Liaco123/Flow.Launcher.Plugin.WebDAVBackup/releases/download/v1.0.0/Flow.Launcher.Plugin.WebDAVBackup-1.0.0.zip
+pm install https://github.com/Liaco123/Flow.Launcher.Plugin.WebDAVBackup/releases/download/v1.1.2/Flow.Launcher.Plugin.WebDAVBackup-1.1.2.zip
 ```
 
 ### Usage
