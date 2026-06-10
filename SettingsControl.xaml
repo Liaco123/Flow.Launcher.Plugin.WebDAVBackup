@@ -3,7 +3,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-             d:DesignHeight="480"
+             d:DesignHeight="520"
              d:DesignWidth="560"
              mc:Ignorable="d">
     <Grid Margin="12">
@@ -11,6 +11,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="8" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -72,19 +73,41 @@
                   Checked="ShowPasswordCheckBox_OnChanged"
                   Unchecked="ShowPasswordCheckBox_OnChanged" />
 
-        <TextBlock Grid.Row="10"
+        <Grid Grid.Row="10"
+              Margin="0,8,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Button x:Name="TestConnectionButton"
+                    Grid.Column="0"
+                    MinWidth="150"
+                    Padding="8,3"
+                    Click="TestConnectionButton_OnClick"
+                    Content="Test connection" />
+            <TextBlock x:Name="TestConnectionStatusTextBlock"
+                       Grid.Column="1"
+                       Margin="10,0,0,0"
+                       VerticalAlignment="Center"
+                       Foreground="#FF666666"
+                       TextWrapping="Wrap"
+                       Text="Verify WebDAV URL and credentials before backup." />
+        </Grid>
+
+        <TextBlock Grid.Row="11"
                    Margin="0,10,0,4"
                    Text="Backup Filename" />
         <TextBox x:Name="BackupFilenameTextBox"
-                 Grid.Row="11"
+                 Grid.Row="12"
                  MinWidth="360"
                  TextChanged="BackupFilenameTextBox_OnTextChanged" />
 
-        <TextBlock Grid.Row="12"
+        <TextBlock Grid.Row="13"
                    Margin="0,10,0,4"
                    Text="Backup Directories (FlowLauncher subfolders)" />
 
-        <Border Grid.Row="13"
+        <Border Grid.Row="14"
                 BorderBrush="#FFD0D0D0"
                 BorderThickness="1"
                 CornerRadius="4"
@@ -95,7 +118,7 @@
             </ScrollViewer>
         </Border>
 
-        <TextBlock Grid.Row="14"
+        <TextBlock Grid.Row="15"
                    Margin="0,6,0,0"
                    Foreground="#FF666666"
                    Text="Tip: Pull restore runs in an external script to avoid FlowLauncher file locks." />
