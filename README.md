@@ -10,9 +10,10 @@
 
 - `wd push`：
   - 将已勾选的 FlowLauncher 子目录打包为 ZIP
-  - 上传到 WebDAV：`flowlauncher_backup/FlowBackup.zip`（文件名可配置）
+  - 上传到 WebDAV：`flowlauncher_backup/FlowBackup_yyyyMMdd_HHmmss.zip`（基础文件名可配置）
+  - 自动保留最新 3 个备份
 - `wd pull`：
-  - 从 WebDAV 下载 ZIP
+  - 从 WebDAV 备份列表中选择 ZIP
   - 生成临时 PowerShell 脚本执行恢复（先关闭 Flow Launcher，再覆盖文件，最后重启）
 - 设置页支持：
   - 服务器地址、用户名、密码、备份文件名
@@ -24,7 +25,7 @@
 在 Flow Launcher 输入：
 
 ```text
-pm install https://github.com/Liaco123/Flow.Launcher.Plugin.WebDAVBackup/releases/download/v1.1.2/Flow.Launcher.Plugin.WebDAVBackup-1.1.2.zip
+pm install https://github.com/Liaco123/Flow.Launcher.Plugin.WebDAVBackup/releases/download/v1.1.3/Flow.Launcher.Plugin.WebDAVBackup-1.1.3.zip
 ```
 
 ### 使用
@@ -56,6 +57,7 @@ flowchart TD
 
 - 为避免文件锁，恢复不在插件进程内直接覆盖，而是交给外部脚本执行。
 - 恢复 `Plugins` 时会自动跳过当前插件目录，避免覆盖自身导致中断。
+- 恢复 `Settings` 时会跳过当前插件配置，避免覆盖 WebDAV 连接设置。
 
 ---
 
@@ -67,9 +69,10 @@ This plugin backs up Flow Launcher data to a WebDAV server and restores it on de
 
 - `wd push`:
   - Zips selected FlowLauncher subfolders
-  - Uploads to WebDAV path `flowlauncher_backup/FlowBackup.zip` (filename configurable)
+  - Uploads to WebDAV path `flowlauncher_backup/FlowBackup_yyyyMMdd_HHmmss.zip` (base filename configurable)
+  - Keeps the latest 3 backups automatically
 - `wd pull`:
-  - Downloads the ZIP from WebDAV
+  - Lets you choose a ZIP from the WebDAV backup list
   - Runs a temporary PowerShell restore script (kill Flow Launcher -> overwrite files -> restart)
 - Settings panel:
   - Server URL, username, password, backup filename
@@ -81,7 +84,7 @@ This plugin backs up Flow Launcher data to a WebDAV server and restores it on de
 In Flow Launcher, run:
 
 ```text
-pm install https://github.com/Liaco123/Flow.Launcher.Plugin.WebDAVBackup/releases/download/v1.1.2/Flow.Launcher.Plugin.WebDAVBackup-1.1.2.zip
+pm install https://github.com/Liaco123/Flow.Launcher.Plugin.WebDAVBackup/releases/download/v1.1.3/Flow.Launcher.Plugin.WebDAVBackup-1.1.3.zip
 ```
 
 ### Usage
@@ -94,3 +97,4 @@ pm install https://github.com/Liaco123/Flow.Launcher.Plugin.WebDAVBackup/release
 
 - Restore is performed by an external script to avoid locked files while Flow Launcher is running.
 - During `Plugins` restore, this plugin folder is skipped to avoid self-overwrite conflicts.
+- During `Settings` restore, this plugin's own config is skipped to preserve WebDAV connection settings.

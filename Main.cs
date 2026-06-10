@@ -7,6 +7,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Windows.Controls;
+using System.Xml.Linq;
 using Flow.Launcher.Plugin;
 
 namespace Flow.Launcher.Plugin.WebDAVBackup;
@@ -16,6 +17,9 @@ public class Main : IPlugin, ISettingProvider
     private const string FlowRootDirectoryName = "FlowLauncher";
     private const string IconRelativePath = "Images\\app.png";
     private const string RemoteBackupFolderName = "flowlauncher_backup";
+    private const string CurrentPluginId = "c5995623-eb2a-467d-b5ff-f92b5a90992b";
+    private const int RemoteBackupRetentionCount = 3;
+    private const int RestartDelaySeconds = 5;
     private static readonly HttpClient WebDavHttpClient = new();
 
     private PluginInitContext? _context;
@@ -56,12 +60,12 @@ public class Main : IPlugin, ISettingProvider
 
     public List<Result> Query(Query query)
     {
-        var command = (query.Search ?? string.Empty).Trim().ToLowerInvariant();
+        var command = (query.Search ?? string.Empty).Trim().TrimStart(':', '：').ToLowerInvariant();
 
         return command switch
         {
             "push" => new List<Result> { CreatePushResult() },
-            "pull" => new List<Result> { CreatePullResult() },
+            "pull" => CreatePullResults(),
             _ => new List<Result> { CreatePushResult(), CreatePullResult() }
         };
     }
@@ -130,14 +134,9 @@ public class Main : IPlugin, ISettingProvider
         return new Result
         {
             Title = "Pull backup from WebDAV",
-            SubTitle = "Download backup, stop Flow Launcher, restore files, then restart.",
+            SubTitle = "Type 'pull' to choose a timestamped backup.",
             IcoPath = GetIconPath(),
             Score = 99,
-            Action = actionContext =>
-            {
-                _ = RunBackgroundOperationAsync(PullAsync);
-                return true;
-            }
         };
     }
 
@@ -197,7 +196,8 @@ public class Main : IPlugin, ISettingProvider
                 return;
             }
 
-            var remoteFileUri = BuildRemoteFileUri(_settings.ServerUrl, RemoteBackupFolderName, GetEffectiveBackupFilename());
+            var remoteFilename = BuildTimestampedBackupFilename(GetEffectiveBackupFilename(), DateTimeOffset.Now);
+            var remoteFileUri = BuildRemoteFileUri(_settings.ServerUrl, RemoteBackupFolderName, remoteFilename);
             using var fileStream = File.OpenRead(zipPath);
             using var content = new StreamContent(fileStream);
             content.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
@@ -211,6 +211,17 @@ public class Main : IPlugin, ISettingProvider
             using var response = await WebDavHttpClient.SendAsync(request).ConfigureAwait(false);
             if (response.IsSuccessStatusCode)
             {
+                try
+                {
+                    await PruneRemoteBackupsAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    LogException("Backup uploaded, but old remote backup cleanup failed.", ex);
+                    ShowMessage("WebDAV Backup", $"Backup uploaded successfully to {remoteFileUri}, but old backup cleanup failed: {ex.Message}");
+                    return;
+                }
+
                 ShowMessage("WebDAV Backup", $"Backup uploaded successfully to {remoteFileUri}.");
                 return;
             }
@@ -224,7 +235,63 @@ public class Main : IPlugin, ISettingProvider
         }
     }
 
-    private async Task PullAsync()
+    private List<Result> CreatePullResults()
+    {
+        if (!ValidateSettings(out var validationError))
+        {
+            return new List<Result> { CreateDisabledResult("Cannot pull backup", validationError) };
+        }
+
+        try
+        {
+            var backups = ListRemoteBackupsAsync().GetAwaiter().GetResult();
+            if (backups.Count == 0)
+            {
+                return new List<Result>
+                {
+                    CreateDisabledResult("No WebDAV backups found", $"No matching {GetEffectiveBackupFilename()} backups under {RemoteBackupFolderName}.")
+                };
+            }
+
+            return backups
+                .Select((backup, index) => CreatePullResult(backup, 100 - index))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            LogException("Failed to list remote backups.", ex);
+            return new List<Result> { CreateDisabledResult("Cannot list WebDAV backups", ex.Message) };
+        }
+    }
+
+    private Result CreatePullResult(RemoteBackupFile backup, int score)
+    {
+        return new Result
+        {
+            Title = $"Pull backup: {backup.DisplayName}",
+            SubTitle = $"Restore {backup.FileName}. Flow Launcher will close and restart.",
+            IcoPath = GetIconPath(),
+            Score = score,
+            Action = actionContext =>
+            {
+                _ = RunBackgroundOperationAsync(() => PullAsync(backup.Uri, backup.FileName));
+                return true;
+            }
+        };
+    }
+
+    private Result CreateDisabledResult(string title, string subTitle)
+    {
+        return new Result
+        {
+            Title = title,
+            SubTitle = subTitle,
+            IcoPath = GetIconPath(),
+            Score = 1
+        };
+    }
+
+    private async Task PullAsync(Uri remoteFileUri, string remoteFileName)
     {
         if (!ValidateSettings(out var validationError))
         {
@@ -239,7 +306,6 @@ public class Main : IPlugin, ISettingProvider
 
         try
         {
-            var remoteFileUri = BuildRemoteFileUri(_settings.ServerUrl, RemoteBackupFolderName, GetEffectiveBackupFilename());
             using var request = new HttpRequestMessage(HttpMethod.Get, remoteFileUri);
             request.Headers.Authorization = CreateBasicAuthHeader(_settings.Username, _settings.Password);
 
@@ -267,8 +333,10 @@ public class Main : IPlugin, ISettingProvider
                 flowRootPath,
                 flowExecutablePath,
                 GetCurrentPluginFolderName(),
+                CurrentPluginId,
                 flowProcessName,
-                tempDirectory);
+                tempDirectory,
+                RestartDelaySeconds);
             await File.WriteAllTextAsync(scriptPath, scriptContent, new UTF8Encoding(false)).ConfigureAwait(false);
 
             var startInfo = new ProcessStartInfo
@@ -287,7 +355,7 @@ public class Main : IPlugin, ISettingProvider
                 return;
             }
 
-            ShowMessage("WebDAV Backup", "Restore started. Flow Launcher will close and restart.");
+            ShowMessage("WebDAV Backup", $"Restore started from {remoteFileName}. Flow Launcher will close and restart.");
             await Task.Delay(800).ConfigureAwait(false);
             Environment.Exit(0);
         }
@@ -312,6 +380,46 @@ public class Main : IPlugin, ISettingProvider
 
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         return (false, $"Cannot create/verify remote folder '{RemoteBackupFolderName}' ({(int)response.StatusCode}): {body}");
+    }
+
+    private async Task PruneRemoteBackupsAsync()
+    {
+        var backups = await ListRemoteBackupsAsync().ConfigureAwait(false);
+        foreach (var backup in backups.Skip(RemoteBackupRetentionCount))
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Delete, backup.Uri);
+            request.Headers.Authorization = CreateBasicAuthHeader(_settings.Username, _settings.Password);
+            using var response = await WebDavHttpClient.SendAsync(request).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.NotFound)
+            {
+                var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                LogException(
+                    $"Failed to delete old remote backup '{backup.FileName}' ({(int)response.StatusCode}): {body}",
+                    new InvalidOperationException(response.ReasonPhrase));
+            }
+        }
+    }
+
+    private async Task<List<RemoteBackupFile>> ListRemoteBackupsAsync()
+    {
+        var remoteFolderUri = BuildRemoteFolderUri(_settings.ServerUrl, RemoteBackupFolderName);
+        using var request = new HttpRequestMessage(new HttpMethod("PROPFIND"), remoteFolderUri);
+        request.Headers.Authorization = CreateBasicAuthHeader(_settings.Username, _settings.Password);
+        request.Headers.TryAddWithoutValidation("Depth", "1");
+
+        using var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var response = await WebDavHttpClient.SendAsync(request, cancellationTokenSource.Token).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.MultiStatus)
+        {
+            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            throw new InvalidOperationException($"Remote backup list failed ({(int)response.StatusCode}): {body}");
+        }
+
+        var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        return ParseRemoteBackups(responseBody, remoteFolderUri, GetEffectiveBackupFilename())
+            .OrderByDescending(backup => backup.SortTime)
+            .ThenByDescending(backup => backup.FileName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private void SaveSettings()
@@ -396,8 +504,10 @@ public class Main : IPlugin, ISettingProvider
         string flowRootPath,
         string flowExecutablePath,
         string currentPluginFolderName,
+        string currentPluginId,
         string flowProcessName,
-        string tempDirectory)
+        string tempDirectory,
+        int restartDelaySeconds)
     {
         static string EscapePowerShellLiteral(string value)
         {
@@ -408,8 +518,10 @@ public class Main : IPlugin, ISettingProvider
         var escapedFlowRootPath = EscapePowerShellLiteral(flowRootPath);
         var escapedFlowPath = EscapePowerShellLiteral(flowExecutablePath);
         var escapedCurrentPluginFolderName = EscapePowerShellLiteral(currentPluginFolderName);
+        var escapedCurrentPluginId = EscapePowerShellLiteral(currentPluginId);
         var escapedFlowProcessName = EscapePowerShellLiteral(flowProcessName);
         var escapedTempDirectory = EscapePowerShellLiteral(tempDirectory);
+        var safeRestartDelaySeconds = Math.Max(1, restartDelaySeconds);
 
         var lines = new[]
         {
@@ -451,6 +563,20 @@ public class Main : IPlugin, ISettingProvider
             "    # 3. Restore files",
             "    Add-Content -Path $logPath -Value 'Restoring files...'",
             $"    $currentPluginFolderName = '{escapedCurrentPluginFolderName}'",
+            $"    $currentPluginId = '{escapedCurrentPluginId}'",
+            "    $currentPluginConfigMarkers = @($currentPluginFolderName, $currentPluginId) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }",
+            "    function Test-IsCurrentPluginConfigPath {",
+            "        param([string] $Path)",
+            "        if (-not $currentPluginConfigMarkers -or [string]::IsNullOrWhiteSpace($Path)) {",
+            "            return $false",
+            "        }",
+            "        foreach ($marker in $currentPluginConfigMarkers) {",
+            "            if ($Path.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {",
+            "                return $true",
+            "            }",
+            "        }",
+            "        return $false",
+            "    }",
             "    Get-ChildItem -LiteralPath $extractRoot -Directory | ForEach-Object {",
             "        $folderName = $_.Name",
             "        $source = $_.FullName",
@@ -491,6 +617,26 @@ public class Main : IPlugin, ISettingProvider
             "            return",
             "        }",
             string.Empty,
+            "        if ($folderName -ieq 'Settings') {",
+            "            if (-not (Test-Path -LiteralPath $target)) {",
+            "                New-Item -ItemType Directory -Path $target -Force | Out-Null",
+            "            }",
+            "            Get-ChildItem -LiteralPath $source -Recurse -File | ForEach-Object {",
+            "                $relativePath = $_.FullName.Substring($source.Length).TrimStart('\\', '/')",
+            "                if (Test-IsCurrentPluginConfigPath $relativePath) {",
+            "                    Add-Content -Path $logPath -Value \"Skipping current plugin settings file: $relativePath\"",
+            "                    return",
+            "                }",
+            "                $destination = Join-Path $target $relativePath",
+            "                $destinationDirectory = Split-Path -Parent $destination",
+            "                if (-not (Test-Path -LiteralPath $destinationDirectory)) {",
+            "                    New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null",
+            "                }",
+            "                Copy-Item -LiteralPath $_.FullName -Destination $destination -Force",
+            "            }",
+            "            return",
+            "        }",
+            string.Empty,
             "        if (Test-Path -LiteralPath $target) {",
             "            $retry = 3",
             "            while ($retry -gt 0) {",
@@ -513,10 +659,18 @@ public class Main : IPlugin, ISettingProvider
             "}",
             "finally {",
             "    # 4. Restart Flow Launcher",
+            $"    Add-Content -Path $logPath -Value 'Waiting {safeRestartDelaySeconds} seconds before restart.'",
+            $"    Start-Sleep -Seconds {safeRestartDelaySeconds}",
             $"    Add-Content -Path $logPath -Value \"Starting Flow.Launcher process from: '{escapedFlowPath}'\"",
             "    try {",
             $"        Start-Process -FilePath '{escapedFlowPath}'",
-            "        Add-Content -Path $logPath -Value 'Flow.Launcher process started.'",
+            "        Start-Sleep -Seconds 2",
+            "        $runningAfterStart = Get-Process -Name $flowProcessName -ErrorAction SilentlyContinue",
+            "        if ($runningAfterStart) {",
+            "            Add-Content -Path $logPath -Value 'Flow.Launcher process started.'",
+            "        } else {",
+            "            Add-Content -Path $logPath -Value 'Warning: Flow.Launcher process was not detected after start.'",
+            "        }",
             "    }",
             "    catch {",
             "        Add-Content -Path $logPath -Value \"ERROR: Failed to start Flow.Launcher: $_\"",
@@ -698,6 +852,97 @@ public class Main : IPlugin, ISettingProvider
         return Path.Combine(tempDirectory, RemoteBackupFolderName, GetEffectiveBackupFilename());
     }
 
+    private static string BuildTimestampedBackupFilename(string backupFilename, DateTimeOffset timestamp)
+    {
+        var fileName = Path.GetFileName(backupFilename.Trim());
+        var extension = Path.GetExtension(fileName);
+        var nameWithoutExtension = Path.GetFileNameWithoutExtension(fileName);
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            extension = ".zip";
+        }
+
+        if (string.IsNullOrWhiteSpace(nameWithoutExtension))
+        {
+            nameWithoutExtension = Path.GetFileNameWithoutExtension(Settings.DefaultBackupFilename);
+        }
+
+        return $"{nameWithoutExtension}_{timestamp:yyyyMMdd_HHmmss}{extension}";
+    }
+
+    private static List<RemoteBackupFile> ParseRemoteBackups(string responseBody, Uri remoteFolderUri, string backupFilename)
+    {
+        var result = new List<RemoteBackupFile>();
+        var expectedExtension = Path.GetExtension(backupFilename);
+        var expectedPrefix = Path.GetFileNameWithoutExtension(backupFilename) + "_";
+
+        if (string.IsNullOrWhiteSpace(expectedExtension))
+        {
+            expectedExtension = ".zip";
+        }
+
+        var document = XDocument.Parse(responseBody);
+        foreach (var responseElement in document.Descendants().Where(element => element.Name.LocalName == "response"))
+        {
+            var hrefValue = responseElement
+                .Descendants()
+                .FirstOrDefault(element => element.Name.LocalName == "href")
+                ?.Value;
+            if (string.IsNullOrWhiteSpace(hrefValue))
+            {
+                continue;
+            }
+
+            var fileName = Uri.UnescapeDataString(hrefValue.TrimEnd('/').Split('/').Last());
+            if (!IsManagedBackupFilename(fileName, expectedPrefix, expectedExtension))
+            {
+                continue;
+            }
+
+            var lastModifiedText = responseElement
+                .Descendants()
+                .FirstOrDefault(element => element.Name.LocalName == "getlastmodified")
+                ?.Value;
+            var lastModified = DateTimeOffset.TryParse(lastModifiedText, out var parsedLastModified)
+                ? parsedLastModified
+                : DateTimeOffset.MinValue;
+            var timestamp = TryParseBackupTimestamp(fileName, expectedPrefix, expectedExtension) ?? lastModified;
+            var uri = Uri.TryCreate(hrefValue, UriKind.Absolute, out var absoluteUri)
+                ? absoluteUri
+                : new Uri(remoteFolderUri, Uri.EscapeDataString(fileName));
+
+            result.Add(new RemoteBackupFile(fileName, uri, timestamp, FormatBackupDisplayName(fileName, timestamp)));
+        }
+
+        return result;
+    }
+
+    private static bool IsManagedBackupFilename(string fileName, string expectedPrefix, string expectedExtension)
+    {
+        return fileName.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase)
+            && fileName.EndsWith(expectedExtension, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static DateTimeOffset? TryParseBackupTimestamp(string fileName, string expectedPrefix, string expectedExtension)
+    {
+        var timestampText = fileName.Substring(expectedPrefix.Length, fileName.Length - expectedPrefix.Length - expectedExtension.Length);
+        return DateTimeOffset.TryParseExact(
+            timestampText,
+            "yyyyMMdd_HHmmss",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeLocal,
+            out var timestamp)
+            ? timestamp
+            : null;
+    }
+
+    private static string FormatBackupDisplayName(string fileName, DateTimeOffset timestamp)
+    {
+        return timestamp == DateTimeOffset.MinValue
+            ? fileName
+            : $"{timestamp:yyyy-MM-dd HH:mm:ss} ({fileName})";
+    }
+
     private string GetEffectiveBackupFilename()
     {
         var backupFilename = _settings.BackupFilename.Trim();
@@ -767,4 +1012,6 @@ public class Main : IPlugin, ISettingProvider
     {
         _context?.API.LogException(nameof(Main), message, exception, nameof(Main));
     }
+
+    private sealed record RemoteBackupFile(string FileName, Uri Uri, DateTimeOffset SortTime, string DisplayName);
 }
