@@ -774,11 +774,28 @@ public class Main : IPlugin, ISettingProvider
 
     private static void AddDirectoryToArchive(ZipArchive archive, string sourceDirectory, string rootFolderName)
     {
-        foreach (var filePath in Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories))
+        var enumerationOptions = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true
+        };
+
+        foreach (var filePath in Directory.EnumerateFiles(sourceDirectory, "*", enumerationOptions))
         {
             var relativePath = Path.GetRelativePath(sourceDirectory, filePath);
             var entryPath = $"{rootFolderName}/{relativePath.Replace('\\', '/')}";
-            archive.CreateEntryFromFile(filePath, entryPath, CompressionLevel.Optimal);
+            try
+            {
+                archive.CreateEntryFromFile(filePath, entryPath, CompressionLevel.Optimal);
+            }
+            catch (IOException)
+            {
+                // Flow Launcher keeps current log files open; skip locked files and keep backing up.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Skip files that cannot be read by the current process.
+            }
         }
     }
 

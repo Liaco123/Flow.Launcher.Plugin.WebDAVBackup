@@ -240,7 +240,7 @@ public partial class SettingsControl : UserControl
 
     private bool CanUpdateSettings()
     {
-        return _initialized;
+        return _initialized && IsLoaded;
     }
 
     private void MarkDirty(bool saveImmediately = false)
