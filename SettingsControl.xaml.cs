@@ -38,12 +38,12 @@ public partial class SettingsControl : UserControl
         _saveDebounceTimer.Tick += SaveDebounceTimer_OnTick;
 
         InitializeComponent();
+        Loaded += SettingsControl_OnLoaded;
         Unloaded += SettingsControl_OnUnloaded;
 
         ServerUrlTextBox.Text = _settings.ServerUrl;
         UsernameTextBox.Text = _settings.Username;
-        PasswordInput.Password = _settings.Password;
-        PasswordVisibleTextBox.Text = _settings.Password;
+        SyncPasswordInputsFromSettings();
         BackupFilenameTextBox.Text = string.IsNullOrWhiteSpace(_settings.BackupFilename)
             ? Settings.DefaultBackupFilename
             : _settings.BackupFilename;
@@ -78,32 +78,42 @@ public partial class SettingsControl : UserControl
 
     private void PasswordInput_OnPasswordChanged(object sender, RoutedEventArgs e)
     {
-        if (!CanUpdatePasswordInput(PasswordInput) || _isSyncingPassword)
+        if (!CanUpdateSettings() || _isSyncingPassword)
+        {
+            return;
+        }
+
+        var password = PasswordInput.Password;
+        if (!CanReplacePassword(password))
         {
             return;
         }
 
         _isSyncingPassword = true;
-        PasswordVisibleTextBox.Text = PasswordInput.Password;
+        PasswordVisibleTextBox.Text = password;
         _isSyncingPassword = false;
 
-        _settings.Password = PasswordInput.Password;
-        MarkDirty(saveImmediately: true);
+        ReplacePassword(password);
     }
 
     private void PasswordVisibleTextBox_OnTextChanged(object sender, TextChangedEventArgs e)
     {
-        if (!CanUpdatePasswordInput(PasswordVisibleTextBox) || _isSyncingPassword)
+        if (!CanUpdateSettings() || _isSyncingPassword)
+        {
+            return;
+        }
+
+        var password = PasswordVisibleTextBox.Text;
+        if (!CanReplacePassword(password))
         {
             return;
         }
 
         _isSyncingPassword = true;
-        PasswordInput.Password = PasswordVisibleTextBox.Text;
+        PasswordInput.Password = password;
         _isSyncingPassword = false;
 
-        _settings.Password = PasswordVisibleTextBox.Text;
-        MarkDirty(saveImmediately: true);
+        ReplacePassword(password);
     }
 
     private void ShowPasswordCheckBox_OnChanged(object sender, RoutedEventArgs e)
@@ -243,9 +253,28 @@ public partial class SettingsControl : UserControl
         return _initialized && IsLoaded;
     }
 
-    private bool CanUpdatePasswordInput(Control input)
+    private bool CanReplacePassword(string password)
     {
-        return CanUpdateSettings() && input.IsVisible && input.IsKeyboardFocusWithin;
+        return !string.IsNullOrEmpty(password) || string.IsNullOrEmpty(_settings.Password);
+    }
+
+    private void ReplacePassword(string password)
+    {
+        if (string.Equals(_settings.Password, password, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _settings.Password = password;
+        MarkDirty(saveImmediately: true);
+    }
+
+    private void SyncPasswordInputsFromSettings()
+    {
+        _isSyncingPassword = true;
+        PasswordInput.Password = _settings.Password;
+        PasswordVisibleTextBox.Text = _settings.Password;
+        _isSyncingPassword = false;
     }
 
     private void MarkDirty(bool saveImmediately = false)
@@ -293,5 +322,10 @@ public partial class SettingsControl : UserControl
     private void SettingsControl_OnUnloaded(object sender, RoutedEventArgs e)
     {
         PersistSettingsNow();
+    }
+
+    private void SettingsControl_OnLoaded(object sender, RoutedEventArgs e)
+    {
+        SyncPasswordInputsFromSettings();
     }
 }
