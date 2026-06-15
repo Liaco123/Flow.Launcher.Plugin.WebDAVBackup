@@ -17,6 +17,7 @@ public class Main : IPlugin, ISettingProvider
     private const string IconRelativePath = "Images\\app.png";
     private const string RemoteBackupFolderName = "flowlauncher_backup";
     private const string CurrentPluginId = "c5995623-eb2a-467d-b5ff-f92b5a90992b";
+    private const string OperationStatusFileName = "operation-status.txt";
     private const int RemoteBackupRetentionCount = 3;
     private const int RestartDelaySeconds = 5;
     private static readonly HttpClient WebDavHttpClient = new();
@@ -55,6 +56,8 @@ public class Main : IPlugin, ISettingProvider
         {
             SaveSettings();
         }
+
+        ShowPendingOperationStatus();
     }
 
     public List<Result> Query(Query query)
@@ -184,6 +187,8 @@ public class Main : IPlugin, ISettingProvider
 
         try
         {
+            var operationStatusPath = GetOperationStatusPath();
+            Directory.CreateDirectory(Path.GetDirectoryName(operationStatusPath)!);
             var remoteFilename = BuildTimestampedBackupFilename(GetEffectiveBackupFilename(), DateTimeOffset.Now);
             var flowExecutablePath = Environment.ProcessPath ?? "Flow.Launcher.exe";
             var flowProcessName = Process.GetCurrentProcess().ProcessName;
@@ -192,6 +197,7 @@ public class Main : IPlugin, ISettingProvider
                 flowExecutablePath,
                 flowProcessName,
                 tempDirectory,
+                operationStatusPath,
                 _settings.ServerUrl,
                 _settings.Username,
                 _settings.Password,
@@ -323,6 +329,8 @@ public class Main : IPlugin, ISettingProvider
             var flowRootPath = GetFlowRootPath();
             var flowExecutablePath = Environment.ProcessPath ?? "Flow.Launcher.exe";
             var flowProcessName = Process.GetCurrentProcess().ProcessName;
+            var operationStatusPath = GetOperationStatusPath();
+            Directory.CreateDirectory(Path.GetDirectoryName(operationStatusPath)!);
 
             // Restore must run out-of-process, otherwise FlowLauncher keeps files locked.
             var scriptContent = BuildRestoreScript(
@@ -333,6 +341,7 @@ public class Main : IPlugin, ISettingProvider
                 CurrentPluginId,
                 flowProcessName,
                 tempDirectory,
+                operationStatusPath,
                 RestartDelaySeconds);
             await File.WriteAllTextAsync(scriptPath, scriptContent, new UTF8Encoding(false)).ConfigureAwait(false);
 
@@ -475,6 +484,7 @@ public class Main : IPlugin, ISettingProvider
         string flowExecutablePath,
         string flowProcessName,
         string tempDirectory,
+        string operationStatusPath,
         string serverUrl,
         string username,
         string password,
@@ -500,6 +510,7 @@ public class Main : IPlugin, ISettingProvider
         var escapedFlowPath = EscapePowerShellLiteral(flowExecutablePath);
         var escapedFlowProcessName = EscapePowerShellLiteral(flowProcessName);
         var escapedTempDirectory = EscapePowerShellLiteral(tempDirectory);
+        var escapedOperationStatusPath = EscapePowerShellLiteral(operationStatusPath);
         var escapedServerUrl = EscapePowerShellLiteral(serverUrl);
         var escapedUsername = EscapePowerShellLiteral(username);
         var escapedPassword = EscapePowerShellLiteral(password);
@@ -513,8 +524,19 @@ public class Main : IPlugin, ISettingProvider
         {
             "$ErrorActionPreference = 'Stop'",
             $"$logPath = Join-Path '{escapedTempDirectory}' 'push_log.txt'",
+            $"$statusPath = '{escapedOperationStatusPath}'",
             "$pushSucceeded = $false",
+            "$operationError = $null",
             "Add-Content -Path $logPath -Value 'Starting backup push...'",
+            string.Empty,
+            "function Set-OperationStatus {",
+            "    param([string] $Message)",
+            "    $statusDirectory = Split-Path -Parent $statusPath",
+            "    if (-not (Test-Path -LiteralPath $statusDirectory)) {",
+            "        New-Item -ItemType Directory -Path $statusDirectory -Force | Out-Null",
+            "    }",
+            "    Set-Content -LiteralPath $statusPath -Value $Message -Encoding UTF8",
+            "}",
             string.Empty,
             "function Get-BasicAuthHeader {",
             "    param([string] $Username, [string] $Password)",
@@ -703,9 +725,15 @@ public class Main : IPlugin, ISettingProvider
             "    Add-Content -Path $logPath -Value 'Backup push completed successfully.'",
             "}",
             "catch {",
+            "    $operationError = $_",
             "    Add-Content -Path $logPath -Value \"ERROR: $_\"",
             "}",
             "finally {",
+            "    if ($pushSucceeded) {",
+            "        Set-OperationStatus \"Push completed successfully: $remoteFilename\"",
+            "    } else {",
+            "        Set-OperationStatus \"Push failed: $operationError\"",
+            "    }",
             $"    Add-Content -Path $logPath -Value 'Waiting {safeRestartDelaySeconds} seconds before restart.'",
             $"    Start-Sleep -Seconds {safeRestartDelaySeconds}",
             $"    Add-Content -Path $logPath -Value \"Starting Flow.Launcher process from: '{escapedFlowPath}'\"",
@@ -732,6 +760,7 @@ public class Main : IPlugin, ISettingProvider
         string currentPluginId,
         string flowProcessName,
         string tempDirectory,
+        string operationStatusPath,
         int restartDelaySeconds)
     {
         static string EscapePowerShellLiteral(string value)
@@ -746,14 +775,26 @@ public class Main : IPlugin, ISettingProvider
         var escapedCurrentPluginId = EscapePowerShellLiteral(currentPluginId);
         var escapedFlowProcessName = EscapePowerShellLiteral(flowProcessName);
         var escapedTempDirectory = EscapePowerShellLiteral(tempDirectory);
+        var escapedOperationStatusPath = EscapePowerShellLiteral(operationStatusPath);
         var safeRestartDelaySeconds = Math.Max(1, restartDelaySeconds);
 
         var lines = new[]
         {
             "$ErrorActionPreference = 'Stop'",
             $"$logPath = Join-Path '{escapedTempDirectory}' 'restore_log.txt'",
+            $"$statusPath = '{escapedOperationStatusPath}'",
             "$restoreSucceeded = $false",
+            "$operationError = $null",
             "Add-Content -Path $logPath -Value 'Starting restore...'",
+            string.Empty,
+            "function Set-OperationStatus {",
+            "    param([string] $Message)",
+            "    $statusDirectory = Split-Path -Parent $statusPath",
+            "    if (-not (Test-Path -LiteralPath $statusDirectory)) {",
+            "        New-Item -ItemType Directory -Path $statusDirectory -Force | Out-Null",
+            "    }",
+            "    Set-Content -LiteralPath $statusPath -Value $Message -Encoding UTF8",
+            "}",
             string.Empty,
             "try {",
             "    # 1. Stop Flow Launcher processes",
@@ -907,13 +948,18 @@ public class Main : IPlugin, ISettingProvider
             "    $restoreSucceeded = $true",
             "}",
             "catch {",
+            "    $operationError = $_",
             "    Add-Content -Path $logPath -Value \"ERROR: $_\"",
             "}",
             "finally {",
+            "    if ($restoreSucceeded) {",
+            "        Set-OperationStatus 'Pull completed successfully.'",
+            "    } else {",
+            "        Set-OperationStatus \"Pull failed: $operationError\"",
+            "    }",
             "    # 4. Restart Flow Launcher",
             "    if (-not $restoreSucceeded) {",
-            "        Add-Content -Path $logPath -Value 'Restore failed; Flow Launcher restart skipped.'",
-            "        return",
+            "        Add-Content -Path $logPath -Value 'Restore failed; Flow Launcher will restart to show status.'",
             "    }",
             $"    Add-Content -Path $logPath -Value 'Waiting {safeRestartDelaySeconds} seconds before restart.'",
             $"    Start-Sleep -Seconds {safeRestartDelaySeconds}",
@@ -1232,6 +1278,39 @@ public class Main : IPlugin, ISettingProvider
     private void ShowMessage(string title, string subTitle)
     {
         _context?.API.ShowMsg(title, subTitle, GetIconPath());
+    }
+
+    private void ShowPendingOperationStatus()
+    {
+        var statusPath = GetOperationStatusPath();
+        if (!File.Exists(statusPath))
+        {
+            return;
+        }
+
+        try
+        {
+            var message = File.ReadAllText(statusPath).Trim();
+            SafeDeleteFile(statusPath);
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                ShowMessage("WebDAV Backup", message);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogException("Failed to read operation status.", ex);
+        }
+    }
+
+    private string GetOperationStatusPath()
+    {
+        return Path.Combine(
+            GetFlowRootPath(),
+            "Settings",
+            "Plugins",
+            CurrentPluginId,
+            OperationStatusFileName);
     }
 
     private void LogException(string message, Exception exception)
