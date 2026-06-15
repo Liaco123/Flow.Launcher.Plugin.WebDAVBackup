@@ -78,7 +78,7 @@ public partial class SettingsControl : UserControl
 
     private void PasswordInput_OnPasswordChanged(object sender, RoutedEventArgs e)
     {
-        if (!CanUpdateSettings() || _isSyncingPassword)
+        if (!CanUpdatePasswordInput(PasswordInput) || _isSyncingPassword)
         {
             return;
         }
@@ -93,7 +93,7 @@ public partial class SettingsControl : UserControl
 
     private void PasswordVisibleTextBox_OnTextChanged(object sender, TextChangedEventArgs e)
     {
-        if (!CanUpdateSettings() || _isSyncingPassword)
+        if (!CanUpdatePasswordInput(PasswordVisibleTextBox) || _isSyncingPassword)
         {
             return;
         }
@@ -241,6 +241,11 @@ public partial class SettingsControl : UserControl
     private bool CanUpdateSettings()
     {
         return _initialized && IsLoaded;
+    }
+
+    private bool CanUpdatePasswordInput(Control input)
+    {
+        return CanUpdateSettings() && input.IsVisible && input.IsKeyboardFocusWithin;
     }
 
     private void MarkDirty(bool saveImmediately = false)

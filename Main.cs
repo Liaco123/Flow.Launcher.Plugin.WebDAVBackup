@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -181,62 +180,55 @@ public class Main : IPlugin, ISettingProvider
         }
 
         var tempDirectory = CreateTempDirectory();
-        var zipPath = GetLocalBackupZipPath(tempDirectory);
-        Directory.CreateDirectory(Path.GetDirectoryName(zipPath)!);
+        var scriptPath = Path.Combine(tempDirectory, "push-flow-data.ps1");
 
         try
         {
-            var addedDirectoryCount = CreateBackupArchive(flowRootPath, zipPath, selectedDirectories);
-            if (addedDirectoryCount == 0)
-            {
-                ShowMessage("WebDAV Backup", "Selected subfolders were not found under FlowLauncher.");
-                return;
-            }
-
-            var remoteFolderUri = BuildRemoteFolderUri(_settings.ServerUrl, RemoteBackupFolderName);
-            var ensureFolderResult = await EnsureRemoteBackupFolderAsync(remoteFolderUri).ConfigureAwait(false);
-            if (!ensureFolderResult.Success)
-            {
-                ShowMessage("WebDAV Backup", ensureFolderResult.Error);
-                return;
-            }
-
             var remoteFilename = BuildTimestampedBackupFilename(GetEffectiveBackupFilename(), DateTimeOffset.Now);
-            var remoteFileUri = BuildRemoteFileUri(_settings.ServerUrl, RemoteBackupFolderName, remoteFilename);
-            using var fileStream = File.OpenRead(zipPath);
-            using var content = new StreamContent(fileStream);
-            content.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+            var flowExecutablePath = Environment.ProcessPath ?? "Flow.Launcher.exe";
+            var flowProcessName = Process.GetCurrentProcess().ProcessName;
+            var scriptContent = BuildPushScript(
+                flowRootPath,
+                flowExecutablePath,
+                flowProcessName,
+                tempDirectory,
+                _settings.ServerUrl,
+                _settings.Username,
+                _settings.Password,
+                GetEffectiveBackupFilename(),
+                remoteFilename,
+                selectedDirectories,
+                RemoteBackupRetentionCount,
+                RestartDelaySeconds);
+            await File.WriteAllTextAsync(scriptPath, scriptContent, new UTF8Encoding(false)).ConfigureAwait(false);
 
-            using var request = new HttpRequestMessage(HttpMethod.Put, remoteFileUri)
+            var startInfo = new ProcessStartInfo
             {
-                Content = content
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
+                WorkingDirectory = tempDirectory,
+                CreateNoWindow = true,
+                UseShellExecute = false
             };
-            request.Headers.Authorization = CreateBasicAuthHeader(_settings.Username, _settings.Password);
 
-            using var response = await WebDavHttpClient.SendAsync(request).ConfigureAwait(false);
-            if (response.IsSuccessStatusCode)
+            var scriptProcess = Process.Start(startInfo);
+            if (scriptProcess == null)
             {
-                try
-                {
-                    await PruneRemoteBackupsAsync().ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    LogException("Backup uploaded, but old remote backup cleanup failed.", ex);
-                    ShowMessage("WebDAV Backup", $"Backup uploaded successfully to {remoteFileUri}, but old backup cleanup failed: {ex.Message}");
-                    return;
-                }
-
-                ShowMessage("WebDAV Backup", $"Backup uploaded successfully to {remoteFileUri}.");
+                ShowMessage("WebDAV Backup", "Backup script failed to start.");
+                SafeDeleteFile(scriptPath);
+                SafeDeleteDirectory(tempDirectory);
                 return;
             }
 
-            var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-            ShowMessage("WebDAV Backup", $"Upload failed ({(int)response.StatusCode}): {responseBody}");
+            ShowMessage("WebDAV Backup", $"Backup started. Flow Launcher will close and restart after upload: {remoteFilename}");
+            await Task.Delay(800).ConfigureAwait(false);
+            Environment.Exit(0);
         }
-        finally
+        catch
         {
+            SafeDeleteFile(scriptPath);
             SafeDeleteDirectory(tempDirectory);
+            throw;
         }
     }
 
@@ -372,39 +364,6 @@ public class Main : IPlugin, ISettingProvider
         }
     }
 
-    private async Task<(bool Success, string Error)> EnsureRemoteBackupFolderAsync(Uri remoteFolderUri)
-    {
-        using var request = new HttpRequestMessage(new HttpMethod("MKCOL"), remoteFolderUri);
-        request.Headers.Authorization = CreateBasicAuthHeader(_settings.Username, _settings.Password);
-
-        using var response = await WebDavHttpClient.SendAsync(request).ConfigureAwait(false);
-        if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.MethodNotAllowed)
-        {
-            return (true, string.Empty);
-        }
-
-        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-        return (false, $"Cannot create/verify remote folder '{RemoteBackupFolderName}' ({(int)response.StatusCode}): {body}");
-    }
-
-    private async Task PruneRemoteBackupsAsync()
-    {
-        var backups = await ListRemoteBackupsAsync().ConfigureAwait(false);
-        foreach (var backup in backups.Skip(RemoteBackupRetentionCount))
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Delete, backup.Uri);
-            request.Headers.Authorization = CreateBasicAuthHeader(_settings.Username, _settings.Password);
-            using var response = await WebDavHttpClient.SendAsync(request).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.NotFound)
-            {
-                var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                LogException(
-                    $"Failed to delete old remote backup '{backup.FileName}' ({(int)response.StatusCode}): {body}",
-                    new InvalidOperationException(response.ReasonPhrase));
-            }
-        }
-    }
-
     private async Task<List<RemoteBackupFile>> ListRemoteBackupsAsync()
     {
         var remoteFolderUri = BuildRemoteFolderUri(_settings.ServerUrl, RemoteBackupFolderName);
@@ -489,15 +448,6 @@ public class Main : IPlugin, ISettingProvider
         return new Uri(baseUri, $"{encodedFolder}/");
     }
 
-    private static Uri BuildRemoteFileUri(string serverUrl, string folderName, string backupFilename)
-    {
-        var normalizedServerUrl = AppendTrailingSlash(serverUrl);
-        var baseUri = new Uri(normalizedServerUrl, UriKind.Absolute);
-        var encodedFolder = Uri.EscapeDataString(folderName.Trim('/'));
-        var encodedFilename = Uri.EscapeDataString(Path.GetFileName(backupFilename.Trim()));
-        return new Uri(baseUri, $"{encodedFolder}/{encodedFilename}");
-    }
-
     private static string AppendTrailingSlash(string value)
     {
         var trimmed = value.Trim();
@@ -518,6 +468,260 @@ public class Main : IPlugin, ISettingProvider
         }
 
         return command.TrimStart(':', '：').ToLowerInvariant();
+    }
+
+    private static string BuildPushScript(
+        string flowRootPath,
+        string flowExecutablePath,
+        string flowProcessName,
+        string tempDirectory,
+        string serverUrl,
+        string username,
+        string password,
+        string backupFilename,
+        string remoteFilename,
+        IReadOnlyList<string> selectedDirectories,
+        int retentionCount,
+        int restartDelaySeconds)
+    {
+        static string EscapePowerShellLiteral(string value)
+        {
+            return value.Replace("'", "''");
+        }
+
+        static string ToPowerShellArray(IReadOnlyList<string> values)
+        {
+            return values.Count == 0
+                ? "@()"
+                : "@(" + string.Join(", ", values.Select(value => $"'{EscapePowerShellLiteral(value)}'")) + ")";
+        }
+
+        var escapedFlowRootPath = EscapePowerShellLiteral(flowRootPath);
+        var escapedFlowPath = EscapePowerShellLiteral(flowExecutablePath);
+        var escapedFlowProcessName = EscapePowerShellLiteral(flowProcessName);
+        var escapedTempDirectory = EscapePowerShellLiteral(tempDirectory);
+        var escapedServerUrl = EscapePowerShellLiteral(serverUrl);
+        var escapedUsername = EscapePowerShellLiteral(username);
+        var escapedPassword = EscapePowerShellLiteral(password);
+        var escapedBackupFilename = EscapePowerShellLiteral(backupFilename);
+        var escapedRemoteFilename = EscapePowerShellLiteral(remoteFilename);
+        var selectedDirectoryArray = ToPowerShellArray(selectedDirectories);
+        var safeRetentionCount = Math.Max(1, retentionCount);
+        var safeRestartDelaySeconds = Math.Max(1, restartDelaySeconds);
+
+        var lines = new[]
+        {
+            "$ErrorActionPreference = 'Stop'",
+            $"$logPath = Join-Path '{escapedTempDirectory}' 'push_log.txt'",
+            "$pushSucceeded = $false",
+            "Add-Content -Path $logPath -Value 'Starting backup push...'",
+            string.Empty,
+            "function Get-BasicAuthHeader {",
+            "    param([string] $Username, [string] $Password)",
+            "    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Username + ':' + $Password)",
+            "    return 'Basic ' + [Convert]::ToBase64String($bytes)",
+            "}",
+            string.Empty,
+            "function Add-TrailingSlash {",
+            "    param([string] $Value)",
+            "    $trimmed = $Value.Trim()",
+            "    if ($trimmed.EndsWith('/')) { return $trimmed }",
+            "    return $trimmed + '/'",
+            "}",
+            string.Empty,
+            "function Get-RemoteFolderUri {",
+            "    param([string] $ServerUrl, [string] $FolderName)",
+            "    $baseUri = [Uri](Add-TrailingSlash $ServerUrl)",
+            "    return [Uri]::new($baseUri, [Uri]::EscapeDataString($FolderName.Trim('/')) + '/')",
+            "}",
+            string.Empty,
+            "function Get-RemoteFileUri {",
+            "    param([string] $ServerUrl, [string] $FolderName, [string] $FileName)",
+            "    $baseUri = [Uri](Add-TrailingSlash $ServerUrl)",
+            "    $folder = [Uri]::EscapeDataString($FolderName.Trim('/'))",
+            "    $name = [Uri]::EscapeDataString([IO.Path]::GetFileName($FileName.Trim()))",
+            "    return [Uri]::new($baseUri, $folder + '/' + $name)",
+            "}",
+            string.Empty,
+            "function Invoke-WebDavRequest {",
+            "    param([string] $Method, [Uri] $Uri, [hashtable] $Headers, [string] $InFile)",
+            "    $request = [System.Net.HttpWebRequest]::Create($Uri)",
+            "    $request.Method = $Method",
+            "    foreach ($key in $Headers.Keys) {",
+            "        $request.Headers[$key] = $Headers[$key]",
+            "    }",
+            "    if (-not [string]::IsNullOrWhiteSpace($InFile)) {",
+            "        $request.ContentType = 'application/zip'",
+            "        $fileStream = [IO.File]::OpenRead($InFile)",
+            "        try {",
+            "            $requestStream = $request.GetRequestStream()",
+            "            try {",
+            "                $fileStream.CopyTo($requestStream)",
+            "            } finally {",
+            "                $requestStream.Dispose()",
+            "            }",
+            "        } finally {",
+            "            $fileStream.Dispose()",
+            "        }",
+            "    }",
+            "    $response = $request.GetResponse()",
+            "    try {",
+            "        $reader = [IO.StreamReader]::new($response.GetResponseStream())",
+            "        try {",
+            "            $content = $reader.ReadToEnd()",
+            "        } finally {",
+            "            $reader.Dispose()",
+            "        }",
+            "        return [PSCustomObject]@{ StatusCode = [int]$response.StatusCode; Content = $content; ResponseUri = $response.ResponseUri }",
+            "    } finally {",
+            "        $response.Dispose()",
+            "    }",
+            "}",
+            string.Empty,
+            "function Test-IsManagedBackupFile {",
+            "    param([string] $FileName, [string] $BaseFileName, [string] $Prefix, [string] $Extension)",
+            "    return $FileName.Equals($BaseFileName, [System.StringComparison]::OrdinalIgnoreCase) -or ($FileName.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) -and $FileName.EndsWith($Extension, [System.StringComparison]::OrdinalIgnoreCase))",
+            "}",
+            string.Empty,
+            "try {",
+            "    Add-Content -Path $logPath -Value 'Stopping Flow.Launcher processes...'",
+            $"    $flowProcessName = '{escapedFlowProcessName}'",
+            "    $flowProcesses = Get-Process -Name $flowProcessName -ErrorAction SilentlyContinue",
+            "    if ($flowProcesses) {",
+            "        foreach ($p in $flowProcesses) {",
+            "            Add-Content -Path $logPath -Value \"Stopping process ID $($p.Id)\"",
+            "            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue",
+            "        }",
+            "        $timeout = 10",
+            "        while ($timeout -gt 0) {",
+            "            $running = Get-Process -Name $flowProcessName -ErrorAction SilentlyContinue",
+            "            if (-not $running) { break }",
+            "            Start-Sleep -Seconds 1",
+            "            $timeout--",
+            "        }",
+            "    }",
+            "    if (Get-Process -Name $flowProcessName -ErrorAction SilentlyContinue) {",
+            "        throw 'Flow Launcher process did not exit before backup.'",
+            "    }",
+            string.Empty,
+            $"    $flowRootPath = '{escapedFlowRootPath}'",
+            $"    $selectedDirectories = {selectedDirectoryArray}",
+            "    $sourceDirectories = @()",
+            "    foreach ($directoryName in $selectedDirectories) {",
+            "        $sourceDirectory = Join-Path $flowRootPath $directoryName",
+            "        if (Test-Path -LiteralPath $sourceDirectory -PathType Container) {",
+            "            $sourceDirectories += [PSCustomObject]@{ Name = $directoryName; Path = $sourceDirectory }",
+            "        }",
+            "    }",
+            "    if ($sourceDirectories.Count -eq 0) {",
+            "        throw 'Selected subfolders were not found under FlowLauncher.'",
+            "    }",
+            string.Empty,
+            $"    $zipRoot = Join-Path '{escapedTempDirectory}' '{RemoteBackupFolderName}'",
+            "    New-Item -ItemType Directory -Path $zipRoot -Force | Out-Null",
+            $"    $zipPath = Join-Path $zipRoot '{escapedRemoteFilename}'",
+            "    if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }",
+            "    Add-Content -Path $logPath -Value \"Creating backup zip: $zipPath\"",
+            "    Add-Type -AssemblyName System.IO.Compression",
+            "    Add-Type -AssemblyName System.IO.Compression.FileSystem",
+            "    $zipStream = [IO.File]::Create($zipPath)",
+            "    try {",
+            "        $archive = [IO.Compression.ZipArchive]::new($zipStream, [IO.Compression.ZipArchiveMode]::Create)",
+            "        try {",
+            "            foreach ($source in $sourceDirectories) {",
+            "                foreach ($file in [IO.Directory]::EnumerateFiles($source.Path, '*', [IO.SearchOption]::AllDirectories)) {",
+            "                    $relativePath = $file.Substring($source.Path.Length).TrimStart('\\', '/')",
+            "                    $entryPath = ($source.Name + '/' + $relativePath.Replace('\\', '/'))",
+            "                    [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file, $entryPath, [IO.Compression.CompressionLevel]::Optimal) | Out-Null",
+            "                }",
+            "            }",
+            "        } finally {",
+            "            $archive.Dispose()",
+            "        }",
+            "    } finally {",
+            "        $zipStream.Dispose()",
+            "    }",
+            string.Empty,
+            $"    $serverUrl = '{escapedServerUrl}'",
+            $"    $remoteFolderName = '{RemoteBackupFolderName}'",
+            $"    $backupFilename = '{escapedBackupFilename}'",
+            $"    $remoteFilename = '{escapedRemoteFilename}'",
+            $"    $headers = @{{ Authorization = (Get-BasicAuthHeader '{escapedUsername}' '{escapedPassword}') }}",
+            "    $remoteFolderUri = Get-RemoteFolderUri $serverUrl $remoteFolderName",
+            "    Add-Content -Path $logPath -Value \"Ensuring remote folder: $remoteFolderUri\"",
+            "    try {",
+            "        Invoke-WebDavRequest -Method 'MKCOL' -Uri $remoteFolderUri -Headers $headers | Out-Null",
+            "    } catch {",
+            "        $statusCode = [int]$_.Exception.Response.StatusCode",
+            "        if ($statusCode -ne 405) { throw }",
+            "    }",
+            string.Empty,
+            "    $remoteFileUri = Get-RemoteFileUri $serverUrl $remoteFolderName $remoteFilename",
+            "    Add-Content -Path $logPath -Value \"Uploading backup to: $remoteFileUri\"",
+            "    Invoke-WebDavRequest -Method 'PUT' -Uri $remoteFileUri -Headers $headers -InFile $zipPath | Out-Null",
+            string.Empty,
+            "    Add-Content -Path $logPath -Value 'Pruning old remote backups...'",
+            "    $propfindHeaders = $headers.Clone()",
+            "    $propfindHeaders['Depth'] = '1'",
+            "    $listResponse = Invoke-WebDavRequest -Method 'PROPFIND' -Uri $remoteFolderUri -Headers $propfindHeaders",
+            "    [xml]$xml = $listResponse.Content",
+            "    $baseFileName = [IO.Path]::GetFileName($backupFilename)",
+            "    $extension = [IO.Path]::GetExtension($backupFilename)",
+            "    if ([string]::IsNullOrWhiteSpace($extension)) { $extension = '.zip' }",
+            "    $prefix = [IO.Path]::GetFileNameWithoutExtension($backupFilename) + '_'",
+            "    $backups = @()",
+            "    foreach ($node in $xml.SelectNodes(\"//*[local-name()='response']\")) {",
+            "        $hrefNode = $node.SelectSingleNode(\".//*[local-name()='href']\")",
+            "        if ($null -eq $hrefNode -or [string]::IsNullOrWhiteSpace($hrefNode.InnerText)) { continue }",
+            "        $fileName = [Uri]::UnescapeDataString($hrefNode.InnerText.TrimEnd('/').Split('/')[-1])",
+            "        if (-not (Test-IsManagedBackupFile $fileName $baseFileName $prefix $extension)) { continue }",
+            "        $timestamp = [DateTimeOffset]::MinValue",
+            "        if ($fileName.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) -and $fileName.EndsWith($extension, [System.StringComparison]::OrdinalIgnoreCase)) {",
+            "            $timestampText = $fileName.Substring($prefix.Length, $fileName.Length - $prefix.Length - $extension.Length)",
+            "            [DateTimeOffset]::TryParseExact($timestampText, 'yyyyMMdd_HHmmss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$timestamp) | Out-Null",
+            "        }",
+            "        $lastModifiedNode = $node.SelectSingleNode(\".//*[local-name()='getlastmodified']\")",
+            "        if ($timestamp -eq [DateTimeOffset]::MinValue -and $null -ne $lastModifiedNode) {",
+            "            [DateTimeOffset]::TryParse($lastModifiedNode.InnerText, [ref]$timestamp) | Out-Null",
+            "        }",
+            "        $backupUri = $null",
+            "        if (-not [Uri]::TryCreate($hrefNode.InnerText, [UriKind]::Absolute, [ref]$backupUri)) {",
+            "            $backupUri = [Uri]::new($remoteFolderUri, [Uri]::EscapeDataString($fileName))",
+            "        }",
+            "        $backups += [PSCustomObject]@{ FileName = $fileName; Uri = $backupUri; SortTime = $timestamp }",
+            "    }",
+            $"    foreach ($backup in ($backups | Sort-Object SortTime, FileName -Descending | Select-Object -Skip {safeRetentionCount})) {{",
+            "        Add-Content -Path $logPath -Value \"Deleting old backup: $($backup.FileName)\"",
+            "        try {",
+            "            Invoke-WebDavRequest -Method 'DELETE' -Uri $backup.Uri -Headers $headers | Out-Null",
+            "        } catch {",
+            "            $statusCode = [int]$_.Exception.Response.StatusCode",
+            "            if ($statusCode -ne 404) { throw }",
+            "        }",
+            "    }",
+            "    $pushSucceeded = $true",
+            "    Add-Content -Path $logPath -Value 'Backup push completed successfully.'",
+            "}",
+            "catch {",
+            "    Add-Content -Path $logPath -Value \"ERROR: $_\"",
+            "}",
+            "finally {",
+            $"    Add-Content -Path $logPath -Value 'Waiting {safeRestartDelaySeconds} seconds before restart.'",
+            $"    Start-Sleep -Seconds {safeRestartDelaySeconds}",
+            $"    Add-Content -Path $logPath -Value \"Starting Flow.Launcher process from: '{escapedFlowPath}'\"",
+            "    try {",
+            $"        Start-Process -FilePath '{escapedFlowPath}'",
+            "    } catch {",
+            "        Add-Content -Path $logPath -Value \"ERROR: Failed to start Flow.Launcher: $_\"",
+            "    }",
+            "    if ($pushSucceeded) {",
+            "        Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue",
+            "    }",
+            "    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
+            "}"
+        };
+
+        return string.Join(Environment.NewLine, lines);
     }
 
     private static string BuildRestoreScript(
@@ -738,65 +942,6 @@ public class Main : IPlugin, ISettingProvider
         };
 
         return string.Join(Environment.NewLine, lines);
-    }
-
-    private static int CreateBackupArchive(string flowRootPath, string zipPath, IReadOnlyList<string> selectedDirectories)
-    {
-        if (File.Exists(zipPath))
-        {
-            File.Delete(zipPath);
-        }
-
-        using var zipStream = File.Create(zipPath);
-        using var archive = new ZipArchive(zipStream, ZipArchiveMode.Create);
-
-        var addedDirectoryCount = 0;
-        foreach (var folderName in selectedDirectories)
-        {
-            var normalizedFolderName = NormalizeDirectoryName(folderName);
-            if (string.IsNullOrWhiteSpace(normalizedFolderName))
-            {
-                continue;
-            }
-
-            var sourceDirectory = Path.Combine(flowRootPath, normalizedFolderName);
-            if (!Directory.Exists(sourceDirectory))
-            {
-                continue;
-            }
-
-            AddDirectoryToArchive(archive, sourceDirectory, normalizedFolderName);
-            addedDirectoryCount++;
-        }
-
-        return addedDirectoryCount;
-    }
-
-    private static void AddDirectoryToArchive(ZipArchive archive, string sourceDirectory, string rootFolderName)
-    {
-        var enumerationOptions = new EnumerationOptions
-        {
-            RecurseSubdirectories = true,
-            IgnoreInaccessible = true
-        };
-
-        foreach (var filePath in Directory.EnumerateFiles(sourceDirectory, "*", enumerationOptions))
-        {
-            var relativePath = Path.GetRelativePath(sourceDirectory, filePath);
-            var entryPath = $"{rootFolderName}/{relativePath.Replace('\\', '/')}";
-            try
-            {
-                archive.CreateEntryFromFile(filePath, entryPath, CompressionLevel.Optimal);
-            }
-            catch (IOException)
-            {
-                // Flow Launcher keeps current log files open; skip locked files and keep backing up.
-            }
-            catch (UnauthorizedAccessException)
-            {
-                // Skip files that cannot be read by the current process.
-            }
-        }
     }
 
     private static string CreateTempDirectory()
